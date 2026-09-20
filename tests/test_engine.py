@@ -187,7 +187,7 @@ def test_background_dispatch_then_cancel():
     assert engine.status(out["run_id"])["workers"][0]["status"] == "CANCELLED"
 
 
-def test_read_only_agents_narrow_the_toolset_set():
+def test_children_inherit_parent_toolsets():
     lifecycle = FakeLifecycle()
     seen = {}
 
@@ -200,7 +200,14 @@ def test_read_only_agents_narrow_the_toolset_set():
     engine.chains = ChainResolver({})
     engine.dispatch(goal="review", target="oracle")
     engine.dispatch(goal="build", target="hephaestus")
-    assert "terminal" not in seen["oracle"]
-    assert "terminal" in seen["hephaestus"]
-    assert "mcp-plane" in seen["hephaestus"]
-    assert "mcp-plane" not in seen["oracle"]
+    assert seen["oracle"] is None
+    assert seen["hephaestus"] is None
+
+
+def test_read_only_is_the_guards_job_not_the_launch():
+    from orchestrator.guards import READ_ONLY_WORKERS, read_only_pre_tool_call
+
+    READ_ONLY_WORKERS.mark("sa-oracle", "oracle")
+    assert read_only_pre_tool_call(tool_name="write_file", session_id="sa-oracle")["action"] == "block"
+    assert read_only_pre_tool_call(tool_name="write_file", session_id="sa-builder") is None
+    READ_ONLY_WORKERS.clear("sa-oracle")

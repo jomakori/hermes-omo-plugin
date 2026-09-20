@@ -103,8 +103,12 @@ class OmoEngine:
         self.runs[run_id] = run
 
         spec = AGENTS[name]
-        toolsets = spec.effective_toolsets(mcp_enabled=bool(self._config("mcp_enabled", True)))
-        request = self._request(goal=goal, context=context, spec=spec, model=worker.model, toolsets=toolsets)
+        # Children inherit the parent's toolsets: Hermes validates that a launch's
+        # allowed_toolsets is a subset of the parent's set and refuses it otherwise
+        # ("Requested toolsets would broaden parent permissions"), and the parent's
+        # set is not exposed to plugins. Read-only agents are constrained by the
+        # pre_tool_call guard instead, which does not need a toolset subset.
+        request = self._request(goal=goal, context=context, spec=spec, model=worker.model, toolsets=None)
 
         if background:
             worker.status = RUNNING
@@ -126,7 +130,7 @@ class OmoEngine:
             return default
 
     def _request(
-        self, *, goal: str, context: str | None, spec: Any, model: str | None, toolsets: tuple[str, ...]
+        self, *, goal: str, context: str | None, spec: Any, model: str | None, toolsets: tuple[str, ...] | None
     ) -> Any:
         if self._request_factory is not None:
             return self._request_factory(goal=goal, context=context, spec=spec, model=model, toolsets=toolsets)
@@ -137,7 +141,7 @@ class OmoEngine:
             context=context,
             role="orchestrator" if spec.orchestrator else "leaf",
             model=model,
-            allowed_toolsets=toolsets,
+            allowed_toolsets=toolsets or None,
             metadata={"omo_agent": spec.name, "omo_role": spec.role},
         )
 
