@@ -96,6 +96,7 @@ class OmoEngine:
         parent_agent: str | None = None,
     ) -> dict[str, Any]:
         name, chain = self._resolve_target(target=target, category=category, parent_agent=parent_agent)
+        chain = tuple(self._normalize_model(model) or model for model in chain)
         run_id = f"omo_{uuid.uuid4().hex[:8]}"
         run = Run(run_id=run_id, goal=goal)
         worker = Worker(run_id=run_id, agent_name=name, task=goal, chain=chain, model=chain[0] if chain else None)
@@ -140,7 +141,7 @@ class OmoEngine:
             goal=goal,
             context=context,
             role="orchestrator" if spec.orchestrator else "leaf",
-            model=model,
+            model=self._normalize_model(model),
             allowed_toolsets=toolsets or None,
             metadata={"omo_agent": spec.name, "omo_role": spec.role},
         )
@@ -171,7 +172,11 @@ class OmoEngine:
                 service.wait(handle, timeout_seconds=self._timeout_seconds())
                 result = service.result(handle)
                 worker.result = result
-                worker.status = SUCCEEDED
+                if self._result_failed(result):
+                    worker.status = FAILED
+                    worker.error = self._result_error(result)
+                else:
+                    worker.status = SUCCEEDED
                 worker.finished_at = time.time()
                 return self._outcome(run, worker)
             except Exception as exc:
@@ -188,10 +193,31 @@ class OmoEngine:
         worker.finished_at = time.time()
         return self._outcome(run, worker)
 
+    def _normalize_model(self, model: str | None) -> str | None:
+        # OMO/OpenCode chains are written `provider/model`; Hermes wants the bare
+        # model and takes the provider from `delegation.provider`. Only the
+        # `litellm/` prefix is stripped — aliases like `claude/sonnet-5` are real
+        # model names and must survive intact.
+        if model and model.startswith("litellm/"):
+            return model[len("litellm/") :]
+        return model
+
     def _with_model(self, request: Any, model: str) -> Any:
         import dataclasses  # noqa: PLC0415
 
-        return dataclasses.replace(request, model=model)
+        return dataclasses.replace(request, model=self._normalize_model(model))
+
+    def _result_failed(self, result: Any) -> bool:
+        # A returned result is not automatically a success: the child's terminal
+        # state can be FAILED (e.g. the provider rejected the model) while the
+        # handle-side status still reads succeeded. Trust the child's own state.
+        state = getattr(result, "terminal_state", None)
+        if state is None:
+            return False
+        return "FAILED" in str(getattr(state, "name", state)).upper()
+
+    def _result_error(self, result: Any) -> str:
+        return str(getattr(result, "error_message", "") or getattr(result, "summary", "") or "subagent failed")
 
     def _timeout_seconds(self) -> float:
         return float(self._config("worker_timeout_seconds", 1800))

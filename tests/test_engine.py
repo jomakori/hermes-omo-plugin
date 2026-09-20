@@ -91,9 +91,9 @@ def test_dispatch_sync_succeeds_on_primary():
     ctx, engine = make_engine(lifecycle)
     out = engine.dispatch(goal="scan the repo", target="explore")
     assert out["status"] == "succeeded"
-    assert lifecycle.launches == ["litellm/deepseek-v4-flash"]
-    assert out["model"] == "litellm/deepseek-v4-flash"
-    assert out["result"] == {"summary": "done", "model": "litellm/deepseek-v4-flash"}
+    assert lifecycle.launches == ["deepseek-v4-flash"]
+    assert out["model"] == "deepseek-v4-flash"
+    assert out["result"] == {"summary": "done", "model": "deepseek-v4-flash"}
 
 
 def test_dispatch_falls_back_on_retryable_error():
@@ -101,8 +101,8 @@ def test_dispatch_falls_back_on_retryable_error():
     ctx, engine = make_engine(lifecycle)
     out = engine.dispatch(goal="scan the repo", target="explore")
     assert out["status"] == "succeeded"
-    assert lifecycle.launches == ["litellm/deepseek-v4-flash", "litellm/minimax-m3"]
-    assert out["model"] == "litellm/minimax-m3"
+    assert lifecycle.launches == ["deepseek-v4-flash", "minimax-m3"]
+    assert out["model"] == "minimax-m3"
 
 
 def test_dispatch_exhausts_chain_then_fails():
@@ -126,8 +126,8 @@ def test_chain_override_is_honoured():
     lifecycle = FakeLifecycle()
     _, engine = make_engine(lifecycle, {"chains": {"explore": ["litellm/custom-model"]}})
     out = engine.dispatch(goal="scan", target="explore")
-    assert out["model"] == "litellm/custom-model"
-    assert lifecycle.launches == ["litellm/custom-model"]
+    assert out["model"] == "custom-model"
+    assert lifecycle.launches == ["custom-model"]
 
 
 def test_category_dispatch_targets_junior_with_category_chain():
@@ -135,7 +135,7 @@ def test_category_dispatch_targets_junior_with_category_chain():
     _, engine = make_engine(lifecycle)
     out = engine.dispatch(goal="tiny fix", category="quick")
     assert out["agent"].startswith("sisyphus-junior")
-    assert out["model"] == "litellm/deepseek-v4-flash"
+    assert out["model"] == "deepseek-v4-flash"
 
 
 def test_guard_rejections_propagate():
@@ -211,3 +211,36 @@ def test_read_only_is_the_guards_job_not_the_launch():
     assert read_only_pre_tool_call(tool_name="write_file", session_id="sa-oracle")["action"] == "block"
     assert read_only_pre_tool_call(tool_name="write_file", session_id="sa-builder") is None
     READ_ONLY_WORKERS.clear("sa-oracle")
+
+
+def test_litellm_prefix_is_stripped_for_hermes():
+    lifecycle = FakeLifecycle()
+    _, engine = make_engine(lifecycle, {"chains": {"explore": ["litellm/deepseek-v4-flash"]}})
+    engine.dispatch(goal="scan", target="explore")
+    assert lifecycle.launches == ["deepseek-v4-flash"]
+
+
+def test_model_aliases_with_a_slash_survive():
+    lifecycle = FakeLifecycle()
+    _, engine = make_engine(lifecycle, {"chains": {"explore": ["litellm/claude/sonnet-5"]}})
+    engine.dispatch(goal="scan", target="explore")
+    assert lifecycle.launches == ["claude/sonnet-5"]
+
+
+class _FailedState:
+    name = "FAILED"
+
+
+class FailingResult:
+    terminal_state = _FailedState()
+    error_message = "HTTP 400: Invalid model name passed in model=litellm/x"
+    summary = ""
+
+
+def test_child_terminal_failure_marks_the_run_failed():
+    lifecycle = FakeLifecycle()
+    lifecycle.result = lambda handle: FailingResult()
+    _, engine = make_engine(lifecycle)
+    out = engine.dispatch(goal="scan", target="explore")
+    assert out["status"] == "failed"
+    assert "Invalid model name" in out["error"]
