@@ -1,0 +1,20 @@
+name: omo
+version: 0.1.0
+description: >-
+  Native OMO (Oh My OpenAgent) multi-agent orchestration for Hermes Agent —
+  the ported agent fleet (Sisyphus, Hephaestus, Prometheus, Atlas, Metis,
+  Momus, Oracle, Librarian, Explore, Multimodal-Looker, Sisyphus-Junior)
+  driven through Hermes' own subagent lifecycle. Replaces the OpenCode
+  delegation layer entirely.
+author: jomakori
+provides_tools:
+  - omo
+  - omo_task
+provides_hooks:
+  - pre_tool_call
+  - subagent_start
+  - subagent_stop
+kind: agent
+capabilities:
+  - subagents
+  - tools
