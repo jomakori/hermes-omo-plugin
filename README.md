@@ -10,53 +10,52 @@
 
 </div>
 
-Native OMO multi-agent orchestration for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It runs a fleet of specialised agents — an orchestrator, planners, critics, researchers and engineers — as Hermes subagents, using the host's own lifecycle, sessions, events and transcripts rather than a second runtime beside it.
+# hermes-omo-plugin
 
-## Proof
+Multi-agent orchestration for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It gives the host a roster of named specialist agents — an orchestrator, planners, critics, researchers and engineers — and runs them as Hermes subagents through the host's own lifecycle. Hermes stays the only user-facing identity: workers return structured results, and the host synthesises and speaks.
 
-`ci.yaml` runs the test suite on the Python versions in the workflow, `ruff check` and `ruff format --check`, and a guard that fails if a persona prompt still carries an unresolved template token.
+The roster and the orchestration model are inspired by [oh-my-openagent](#relationship-to-oh-my-openagent) (OMO). What differs is the substrate — no second runtime to install, pin or reconcile.
 
-<!--TOC-->
+## Install
 
-- [Proof](#proof)
-- [What it is](#what-it-is)
-- [Why it exists](#why-it-exists)
-- [How it works](#how-it-works)
-  - [Tools](#tools)
-- [Fleet](#fleet)
-- [Install](#install)
-- [Configuration](#configuration)
-- [Design notes](#design-notes)
-- [Development](#development)
-- [Layout](#layout)
-
-<!--TOC-->
-
-## What it is
-
-A Hermes plugin. Hermes loads it at startup, it registers the `omo` and `omo_task` tools, and from then on the host can dispatch work to a named fleet. There is no build step, no binary, and no service to run.
-
-Hermes stays the only user-facing identity. Workers return structured results to the host, and the host synthesises and speaks — a worker never becomes the assistant.
-
-## Why it exists
-
-The fleet used to run behind an OpenCode server reached through a delegation plugin: a forked plugin, a dedicated server pod, and a third-party npm harness, each versioned and reconciled separately. Hermes now exposes the primitives that layer was emulating — subagent lifecycle, delegation, sessions, events, transcripts, tool scoping and provider routing — so the fleet lives here instead.
-
-That removes the middle tier entirely: nothing sits between Hermes and its subagents.
-
-## How it works
-
-```
-user → Hermes ─┬─ omo / omo_task ─→ orchestrator ─┬─ planner
-               │                                  ├─ critic
-               │                                  ├─ researcher
-               │                                  └─ engineer
-               └──────────────────────────────────┴─ structured results → Hermes → user
+```bash
+hermes plugins install jomakori/hermes-omo-plugin
+hermes plugins enable omo
 ```
 
-Each worker is launched through the host's subagent lifecycle, so it inherits the host's session record, event stream and transcript for free. The plugin adds the parts the host does not provide: the roster, per-agent model chains with an owned fallback state machine, per-agent tool scoping, and a run tree the host can print.
+Or clone it into the host's plugins directory and enable it:
 
-### Tools
+```bash
+git clone https://github.com/jomakori/hermes-omo-plugin.git "${HERMES_HOME:-$HOME/.hermes}/plugins/omo"
+hermes plugins enable omo
+```
+
+## Configuration
+
+Settings are read from `plugins.entries.omo.settings` in the host's `config.yaml`. Model names resolve through the host's provider routing, so use the aliases that routing already exposes.
+
+```yaml
+plugins:
+  enabled:
+    - omo
+  entries:
+    omo:
+      settings:
+        mcp_enabled: true
+        max_fallback_attempts: 3
+        cooldown_seconds: 30
+        restore_primary_after_cooldown: true
+        chains:
+          sisyphus:
+            - "<provider>/<model>"
+            - "<provider>/<fallback>"
+```
+
+Anything omitted falls back to the defaults in `roster.py`.
+
+One host setting matters for the planning pipeline: Hermes derives a child agent's role from its depth and ignores any role a caller passes, so `delegation.max_spawn_depth` must be raised above its default or the tree stays flat and the orchestrator cannot delegate.
+
+## Tools
 
 | Tool | Purpose |
 |---|---|
@@ -85,52 +84,24 @@ Each worker is launched through the host's subagent lifecycle, so it inherits th
 
 Categories — `quick`, `deep`, `ultrabrain`, `visual-engineering`, `writing` — spawn the execution worker with a category-specific chain.
 
-## Install
+## How it works
 
-Clone into the host's plugins directory, then enable it:
+Every worker is launched through the host's subagent lifecycle, so it inherits the host's session record, event stream, transcripts, tool scoping and provider routing. The plugin supplies what the host does not: the roster, per-agent model chains with an owned fallback state machine, per-agent tool scoping, and a run tree the host can print.
 
-```bash
-git clone https://github.com/jomakori/hermes-omo-plugin.git "${HERMES_HOME}/plugins/omo"
-```
+A few decisions are worth knowing because they are not obvious:
 
-```yaml
-plugins:
-  enabled:
-    - omo
-```
+- **Per-agent model, not provider.** The host's launch carries `model` only and derives the provider itself. Per-agent fallback is not native either, so it is owned here — a retryable classifier plus a cooldown/restore state machine in `orchestrator/chains.py`.
+- **Read-only is enforced by hook.** The host's `file` toolset bundles read, write and patch into one unit, and per-tool blocking is rejected at launch, so a `pre_tool_call` guard vetoes writes for read-only sessions.
+- **MCP is scoped by toolset.** MCP servers surface as `mcp-<server>` toolsets, so the orchestrator tier can be given the servers the host exposes while the read-only and research tiers are left without them.
+- **Worker approvals.** Subagent worker threads run non-interactive and refuse dangerous commands by default; ordinary work — files, tests, builds, git — is unaffected.
 
-## Configuration
+## Relationship to oh-my-openagent
 
-Settings are read through Hermes' plugin config, `plugins.entries.omo.settings`. Model names resolve through the host's provider routing, so use the aliases that routing already exposes.
+This plugin is an adaptation of [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) (formerly oh-my-opencode) for Hermes.
 
-```yaml
-plugins:
-  enabled:
-    - omo
-  entries:
-    omo:
-      settings:
-        mcp_enabled: true
-        max_fallback_attempts: 3
-        cooldown_seconds: 30
-        restore_primary_after_cooldown: true
-        chains:
-          sisyphus:
-            - "<provider>/<model>"
-            - "<provider>/<fallback>"
-```
-
-Anything omitted falls back to the defaults in `roster.py`.
-
-## Design notes
-
-The interesting decisions, and why they are what they are:
-
-- **Per-agent model, not provider.** The host's subagent launch carries `model` only and derives the provider itself, so per-agent provider routing is not expressible — and not needed here. Per-agent *fallback* is not native either, so this plugin owns it: a retryable classifier plus a cooldown/restore state machine in `orchestrator/chains.py`.
-- **Read-only is enforced by hook, not toolsets.** The host's `file` toolset bundles read, write and patch into one unit, and per-tool blocking is rejected at launch — so a `pre_tool_call` guard vetoes writes for read-only sessions (`orchestrator/guards.py`).
-- **MCP is scoped by toolset.** MCP servers surface as `mcp-<server>` toolsets, so plane and github access is granted to the orchestrator tier and withheld from the read-only and research tiers.
-- **Nesting needs a host setting.** Hermes derives a child's role from its depth and ignores any role a caller passes, so at the host default the entire tree is flat and the orchestrator cannot delegate at all. Raise `delegation.max_spawn_depth` to allow the planning pipeline to nest.
-- **Worker approvals.** Subagent worker threads run non-interactive: dangerous commands are refused unless the host opts in via `delegation.subagent_auto_approve`. Ordinary work — files, tests, builds, git — is unaffected, and the plugin leaves the safe default alone.
+- **Reused:** the agent roster and personas, the category routing model, and the read-only tool policies.
+- **Replaced:** OMO's runtime coupling. OMO ships as an OpenCode plugin — OpenCode and Bun, the `@opencode-ai` SDK, an `opencode.json` plugin entry, its lifecycle hooks and its `omo.jsonc` config surface. Here the host's own plugin, delegation and config primitives stand in for all of it, so the same roster runs with nothing extra to install.
+- **Not affiliated:** this is an independent, unofficial adaptation and is not produced or endorsed by OMO's authors.
 
 ## Development
 
@@ -140,23 +111,16 @@ python3 -m venv .venv && ./.venv/bin/pip install pytest ruff
 ./.venv/bin/ruff check . && ./.venv/bin/ruff format --check .
 ```
 
-The persona guard can be run directly:
+CI runs the suite, both ruff gates, and a guard that fails if a persona prompt still carries an unresolved template token.
 
-```bash
-grep -oE '\{+[A-Z][A-Z_]{3,}\}+' agents/*.md && echo "unresolved token found" || echo "personas clean"
-```
+## Attribution
 
-## Layout
+The agent roster, personas, categories and read-only policies originate in [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) by code-yeongyu. The persona prompts under `agents/` are ported from it.
 
-```text
-plugin.yaml            manifest
-__init__.py            entrypoint: register()
-roster.py              agent roster — roles, tool scopes, model chains
-orchestrator/          engine, model-chain and fallback resolution, guards
-tools/                 omo and omo_task schemas and handlers
-agents/                per-agent persona prompts
-skills/                bundled skill
-tests/                 unit tests
-```
+**License note:** upstream OMO is **not open source**. It is source-available under the **Sustainable Use License v1.0** (SUL-1.0), which permits use and modification for personal or internal business purposes but restricts commercial use and redistribution. Anyone reusing this repository should review that licence before redistributing the ported prompt text.
+
+## License
+
+Not yet chosen for this repository — see the note under [Attribution](#attribution).
 
 The plugin version lives in `plugin.yaml`.
