@@ -13,7 +13,6 @@ class RecordingCtx:
         self.hooks = {}
         self.commands = {}
         self.unload = []
-        self.approval_transports = {}
         self.subagent_lifecycle = None
 
     def register_tool(self, **kwargs):
@@ -22,11 +21,8 @@ class RecordingCtx:
     def register_hook(self, hook_name, callback):
         self.hooks[hook_name] = callback
 
-    def register_command(self, name, handler, description="", args_hint="", argument_mode=None):
+    def register_command(self, name, handler, description=""):
         self.commands[name] = handler
-
-    def register_approval_transport(self, name, present_fn):
-        self.approval_transports[name] = present_fn
 
     def on_unload(self, callback):
         self.unload.append(callback)
@@ -35,7 +31,7 @@ class RecordingCtx:
         return default
 
 
-def test_register_wires_tools_hooks_commands_and_transport():
+def test_register_wires_tools_hooks_and_command():
     ctx = RecordingCtx()
     plugin.register(ctx)
 
@@ -48,18 +44,9 @@ def test_register_wires_tools_hooks_commands_and_transport():
     assert ctx.tools["omo"]["schema"]["parameters"]["required"] == ["action"]
     assert ctx.tools["omo_task"]["schema"]["parameters"]["required"] == ["prompt"]
 
-    assert set(ctx.hooks) == {"pre_tool_call", "subagent_start", "subagent_stop", "pre_approval_request"}
-    assert set(ctx.commands) == {"omo", "omo-approve", "omo-approvals"}
-    assert set(ctx.approval_transports) == {"omo"}
+    assert set(ctx.hooks) == {"pre_tool_call", "subagent_start", "subagent_stop"}
+    assert set(ctx.commands) == {"omo"}
     assert len(ctx.unload) == 1
-
-
-def test_unload_denies_pending_approvals_before_shutdown():
-    ctx = RecordingCtx()
-    plugin.register(ctx)
-    pending = plugin.PendingRegistry(2)
-    assert pending.deny_all() == 0
-    assert callable(ctx.unload[0])
 
 
 def test_handlers_accept_positional_args_dict():

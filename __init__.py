@@ -1,20 +1,13 @@
 from __future__ import annotations
 
-import logging
 import os
 import sys
 from typing import Any
-
-logger = logging.getLogger(__name__)
 
 _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
-from approvals.commands import make_omo_approvals, make_omo_approve  # noqa: E402
-from approvals.policy import max_pending, resolve_mode  # noqa: E402
-from approvals.registry import PendingRegistry  # noqa: E402
-from approvals.transport import make_present_fn, on_pre_approval_request  # noqa: E402
 from orchestrator.chains import ChainResolver  # noqa: E402
 from orchestrator.engine import OmoEngine  # noqa: E402
 from orchestrator.guards import (  # noqa: E402
@@ -69,40 +62,8 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_tool_call", read_only_pre_tool_call)
     ctx.register_hook("subagent_start", _on_subagent_start)
     ctx.register_hook("subagent_stop", _on_subagent_stop)
-
-    registry = PendingRegistry(max_pending(ctx))
-    ctx.register_approval_transport(PLUGIN_KEY, make_present_fn(ctx, registry))
-    ctx.register_hook("pre_approval_request", on_pre_approval_request)
-    ctx.register_command(
-        "omo-approve",
-        handler=make_omo_approve(registry),
-        description="Answer a waiting OMO approval.",
-        args_hint="<id> <once|session|always|deny>",
-    )
-    ctx.register_command(
-        "omo-approvals",
-        handler=make_omo_approvals(registry),
-        description="List OMO approvals waiting for an answer.",
-    )
-
     ctx.register_command("omo", handler=lambda *_a, **_k: engine.status(), description="Show OMO runs and workers.")
-
-    def _shutdown() -> None:
-        registry.deny_all("plugin unloaded")
-        engine.shutdown()
-
-    ctx.on_unload(_shutdown)
-    _log_transport_state(ctx)
-
-
-def _log_transport_state(ctx: Any) -> None:
-    if resolve_mode(ctx).value == "forward":
-        logger.info(
-            "omo approval transport registered. Forwarding is inert until the host sets "
-            "security.approval.transport: omo in config.yaml and "
-            "plugins.entries.omo.allow_gateway_injection: true; until then Hermes auto-denies "
-            "worker dangerous commands."
-        )
+    ctx.on_unload(engine.shutdown)
 
 
 def _on_subagent_start(**kwargs: Any) -> None:
