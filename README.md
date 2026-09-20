@@ -104,6 +104,43 @@ This plugin is an adaptation of [oh-my-openagent](https://github.com/code-yeongy
 - **Replaced:** OMO's runtime coupling. OMO ships as an OpenCode plugin — OpenCode and Bun, the `@opencode-ai` SDK, an `opencode.json` plugin entry, its lifecycle hooks and its `omo.jsonc` config surface. Here the host's own plugin, delegation and config primitives stand in for all of it, so the same roster runs with nothing extra to install.
 - **Not affiliated:** this is an independent, unofficial adaptation and is not produced or endorsed by OMO's authors.
 
+## Approvals
+
+A worker that attempts a dangerous command needs a human answer. Left alone, Hermes refuses it silently on the worker's behalf. This plugin forwards that request to the session instead: `/omo-approvals` lists what is waiting and `/omo-approve <id> <choice>` answers it.
+
+Three modes, under `plugins.entries.omo.settings`:
+
+| Mode | Behaviour |
+|---|---|
+| `forward` (default) | Ask the session. Fails closed — on timeout, on a refused reply, and on any reply that is not an allowed choice. |
+| `deny` | Refuse immediately. |
+| `auto` | Approve immediately. Requires the acknowledgement below, and logs loudly on every use. |
+
+```yaml
+security:
+  approval:
+    transport: omo            # required — without it, forwarding is inert
+plugins:
+  entries:
+    omo:
+      allow_gateway_injection: true
+      settings:
+        approvals:
+          mode: forward
+          auto_ack: ""                        # must be "i-understand-unattended-approval" for mode: auto
+          allow_choices: [once, deny]         # session/always loosen the host permanently — opt in deliberately
+          max_pending: 6
+```
+
+Without `security.approval.transport: omo` the transport never runs, Hermes keeps auto-denying worker commands, and the plugin says so at startup.
+
+Worth knowing:
+
+- **Selecting the transport replaces Hermes' built-in approval surfaces for every caller**, not only workers — so the operator stops seeing Hermes' own approval panel.
+- **`always` and `session` persist a host-wide rule** that also loosens the main agent. They are not offered unless added to `allow_choices`.
+- **Approval authority is whoever can message the session.** The slash command carries no separate identity check.
+- **The request reaches the plugin redacted**, so only the redacted description, the match pattern and a short id are shown — never the command text.
+
 ## Development
 
 ```bash
