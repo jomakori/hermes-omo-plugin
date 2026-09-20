@@ -14,7 +14,4 @@ provides_hooks:
   - pre_tool_call
   - subagent_start
   - subagent_stop
-kind: agent
-capabilities:
-  - subagents
-  - tools
+kind: standalone

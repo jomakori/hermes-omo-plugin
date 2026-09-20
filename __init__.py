@@ -8,6 +8,8 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
+from omo_tools.omo_task_tool import OMO_TASK_SCHEMA, make_omo_task_handler  # noqa: E402
+from omo_tools.omo_tool import OMO_SCHEMA, make_omo_handler  # noqa: E402
 from orchestrator.chains import ChainResolver  # noqa: E402
 from orchestrator.engine import OmoEngine  # noqa: E402
 from orchestrator.guards import (  # noqa: E402
@@ -17,8 +19,6 @@ from orchestrator.guards import (  # noqa: E402
     read_only_pre_tool_call,
 )
 from roster import AGENTS  # noqa: E402
-from tools.omo_task_tool import OMO_TASK_SCHEMA, make_omo_task_handler  # noqa: E402
-from tools.omo_tool import OMO_SCHEMA, make_omo_handler  # noqa: E402
 
 PLUGIN_KEY = "omo"
 
