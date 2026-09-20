@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from omo_tools.omo_tool import render
+
 OMO_TASK_SCHEMA: dict[str, Any] = {
     "name": "omo_task",
     "description": (
@@ -33,21 +35,23 @@ OMO_TASK_SCHEMA: dict[str, Any] = {
 
 
 def make_omo_task_handler(engine: Any) -> Callable[..., Any]:
-    async def handler(args: dict[str, Any] | None = None, **_kwargs: Any) -> dict[str, Any]:
+    async def handler(args: dict[str, Any] | None = None, **_kwargs: Any) -> str:
         params = args or {}
         prompt = str(params.get("prompt") or "").strip()
         if not prompt:
-            return {"error": "prompt is required."}
+            return render({"error": "prompt is required."})
         target = params.get("agent")
         category = params.get("category")
         if bool(target) == bool(category):
-            return {"error": "Provide exactly one of agent= or category=."}
-        return engine.dispatch(
-            goal=prompt,
-            target=target,
-            category=category,
-            context=params.get("context"),
-            background=bool(params.get("background", False)),
+            return render({"error": "Provide exactly one of agent= or category=."})
+        return render(
+            engine.dispatch(
+                goal=prompt,
+                target=target,
+                category=category,
+                context=params.get("context"),
+                background=bool(params.get("background", False)),
+            )
         )
 
     return handler

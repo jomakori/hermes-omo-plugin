@@ -9,7 +9,7 @@ if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
 from omo_tools.omo_task_tool import OMO_TASK_SCHEMA, make_omo_task_handler  # noqa: E402
-from omo_tools.omo_tool import OMO_SCHEMA, make_omo_handler  # noqa: E402
+from omo_tools.omo_tool import OMO_SCHEMA, make_omo_handler, render  # noqa: E402
 from orchestrator.chains import ChainResolver  # noqa: E402
 from orchestrator.engine import OmoEngine  # noqa: E402
 from orchestrator.guards import (  # noqa: E402
@@ -62,7 +62,9 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_tool_call", read_only_pre_tool_call)
     ctx.register_hook("subagent_start", _on_subagent_start)
     ctx.register_hook("subagent_stop", _on_subagent_stop)
-    ctx.register_command("omo", handler=lambda *_a, **_k: engine.status(), description="Show OMO runs and workers.")
+    ctx.register_command(
+        "omo", handler=lambda *_a, **_k: render(engine.status()), description="Show OMO runs and workers."
+    )
     ctx.on_unload(engine.shutdown)
 
 

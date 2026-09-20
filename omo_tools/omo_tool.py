@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -40,31 +41,37 @@ OMO_SCHEMA: dict[str, Any] = {
 }
 
 
+def render(payload: Any) -> str:
+    return json.dumps(payload, indent=2, default=str)
+
+
 def make_omo_handler(engine: Any) -> Callable[..., Any]:
-    async def handler(args: dict[str, Any] | None = None, **_kwargs: Any) -> dict[str, Any]:
+    async def handler(args: dict[str, Any] | None = None, **_kwargs: Any) -> str:
         params = args or {}
         action = str(params.get("action") or "").strip().lower()
         if action == "dispatch":
             goal = str(params.get("goal") or "").strip()
             if not goal:
-                return {"error": "goal is required to dispatch."}
-            return engine.dispatch(
-                goal=goal,
-                target=params.get("agent"),
-                category=params.get("category"),
-                context=params.get("context"),
-                background=bool(params.get("background", False)),
+                return render({"error": "goal is required to dispatch."})
+            return render(
+                engine.dispatch(
+                    goal=goal,
+                    target=params.get("agent"),
+                    category=params.get("category"),
+                    context=params.get("context"),
+                    background=bool(params.get("background", False)),
+                )
             )
         if action == "status":
-            return engine.status(params.get("run_id"))
+            return render(engine.status(params.get("run_id")))
         if action == "cancel":
             run_id = str(params.get("run_id") or "").strip()
             if not run_id:
-                return {"error": "run_id is required to cancel."}
-            return engine.cancel(run_id)
-        return {"error": f"unknown action '{action}'"}
+                return render({"error": "run_id is required to cancel."})
+            return render(engine.cancel(run_id))
+        return render({"error": f"unknown action '{action}'"})
 
     return handler
 
 
-__all__ = ["OMO_SCHEMA", "make_omo_handler"]
+__all__ = ["OMO_SCHEMA", "make_omo_handler", "render"]

@@ -65,6 +65,18 @@ def test_handlers_accept_positional_args_dict():
     assert "error" in out
 
 
+def test_handlers_and_command_return_strings():
+    ctx = RecordingCtx()
+    plugin.register(ctx)
+
+    for name, tool in ctx.tools.items():
+        out = asyncio.run(tool["handler"]({"action": "status", "prompt": "x"}))
+        assert isinstance(out, str), f"{name} handler returned {type(out).__name__}, not str"
+
+    out = ctx.commands["omo"]("")
+    assert isinstance(out, str), f"/omo returned {type(out).__name__}, not str"
+
+
 def test_subagent_start_marks_read_only_and_stop_clears():
     plugin.register(RecordingCtx())
     start = plugin._on_subagent_start
