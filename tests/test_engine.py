@@ -244,3 +244,39 @@ def test_child_terminal_failure_marks_the_run_failed():
     out = engine.dispatch(goal="scan", target="explore")
     assert out["status"] == "failed"
     assert "Invalid model name" in out["error"]
+
+
+def test_fallback_can_be_disabled():
+    lifecycle = FakeLifecycle(fail_times=99)
+    _, engine = make_engine(lifecycle, {"runtime_fallback": {"enabled": False}})
+    out = engine.dispatch(goal="scan", target="explore")
+    assert out["status"] == "failed"
+    assert len(lifecycle.launches) == 1
+
+
+def test_retry_on_errors_is_configurable():
+    lifecycle = FakeLifecycle(fail_times=99, error="HTTP 429 from provider")
+    _, engine = make_engine(lifecycle, {"runtime_fallback": {"retry_on_errors": [500]}})
+    out = engine.dispatch(goal="scan", target="explore")
+    assert out["status"] == "failed"
+    assert len(lifecycle.launches) == 1
+
+    lifecycle2 = FakeLifecycle(fail_times=1, error="HTTP 429 from provider")
+    _, engine2 = make_engine(lifecycle2, {"runtime_fallback": {"retry_on_errors": [429]}})
+    assert engine2.dispatch(goal="scan", target="explore")["status"] == "succeeded"
+    assert len(lifecycle2.launches) == 2
+
+
+def test_nested_runtime_fallback_overrides_flat_keys():
+    from orchestrator.chains import ChainResolver
+
+    r = ChainResolver({"max_fallback_attempts": 9, "runtime_fallback": {"max_fallback_attempts": 2}})
+    assert r.state_for("explore", ("a", "b", "c")).max_attempts == 2
+
+
+def test_status_is_extracted_from_the_error_message():
+    from orchestrator.chains import status_from_message
+
+    assert status_from_message("HTTP 400: Invalid model name") == 400
+    assert status_from_message("litellm.APIError: 503 service down") == 503
+    assert status_from_message("connection reset by peer") is None

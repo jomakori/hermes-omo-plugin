@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from orchestrator.chains import FallbackState, is_retryable
+from orchestrator.chains import status_from_message
 from orchestrator.guards import GuardError, check_delegation
 from roster import AGENTS, CATEGORIES, agent
 
@@ -148,12 +148,7 @@ class OmoEngine:
 
     def _run_sync(self, run: Run, worker: Worker, request: Any) -> dict[str, Any]:
         service = self._service()
-        state = FallbackState(
-            chain=worker.chain,
-            max_attempts=int(self._config("max_fallback_attempts", 3)),
-            cooldown_seconds=int(self._config("cooldown_seconds", 30)),
-            restore_primary_after_cooldown=bool(self._config("restore_primary_after_cooldown", True)),
-        )
+        state = self.chains.state_for(worker.agent_name, worker.chain)
         last_error = ""
         while True:
             worker.model = request.model
@@ -181,7 +176,7 @@ class OmoEngine:
                 return self._outcome(run, worker)
             except Exception as exc:
                 last_error = str(exc)
-                if not is_retryable(message=last_error):
+                if not state.retryable(status=status_from_message(last_error), message=last_error):
                     break
                 state.record_failure(request.model or "")
                 next_model = state.next_model()

@@ -17,6 +17,13 @@ _RETRYABLE_PATTERN = re.compile(
 
 _VARIANT_SUFFIXES = ("-thinking", "-max", "-high", "-medium", "-low", "-xhigh")
 
+_STATUS_IN_MESSAGE = re.compile(r"\b(?:HTTP\s*)?([45]\d{2})\b")
+
+
+def status_from_message(message: str | None) -> int | None:
+    match = _STATUS_IN_MESSAGE.search(message or "")
+    return int(match.group(1)) if match else None
+
 
 def canonical_model(model: str) -> str:
     base = model.rsplit("/", 1)[-1]
@@ -26,17 +33,33 @@ def canonical_model(model: str) -> str:
     return base
 
 
-def is_retryable(*, status: int | None = None, error_type: str | None = None, message: str = "") -> bool:
+def is_retryable(
+    *,
+    status: int | None = None,
+    error_type: str | None = None,
+    message: str = "",
+    retry_on_errors: frozenset[int] | None = None,
+) -> bool:
     if error_type in NON_RETRYABLE:
         return False
-    if status is not None and status in RETRYABLE_STATUS:
+    codes = retry_on_errors if retry_on_errors is not None else RETRYABLE_STATUS
+    if status is not None and status in codes:
         return True
     return bool(_RETRYABLE_PATTERN.search(message or ""))
+
+
+def parse_retry_on_errors(value: Any) -> frozenset[int]:
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return RETRYABLE_STATUS
+    codes = {int(item) for item in value if str(item).strip().lstrip("-").isdigit()}
+    return frozenset(codes) if codes else RETRYABLE_STATUS
 
 
 @dataclass
 class FallbackState:
     chain: tuple[str, ...]
+    enabled: bool = True
+    retry_on_errors: frozenset[int] = RETRYABLE_STATUS
     max_attempts: int = 3
     cooldown_seconds: int = 30
     restore_primary_after_cooldown: bool = True
@@ -49,13 +72,18 @@ class FallbackState:
         if not self.original and self.chain:
             self.original = self.chain[0]
 
+    def retryable(self, *, status: int | None = None, error_type: str | None = None, message: str = "") -> bool:
+        if not self.enabled:
+            return False
+        return is_retryable(status=status, error_type=error_type, message=message, retry_on_errors=self.retry_on_errors)
+
     def in_cooldown(self, model: str, now: float | None = None) -> bool:
         until = self.cooldowns.get(model)
         current = time.time() if now is None else now
         return until is not None and current < until
 
     def next_model(self, *, now: float | None = None) -> str | None:
-        if self.attempt_count >= self.max_attempts:
+        if not self.enabled or self.attempt_count >= self.max_attempts:
             return None
         seen = {canonical_model(model) for model in self.chain[: self.current_index + 1]}
         for index in range(self.current_index + 1, len(self.chain)):
@@ -91,10 +119,23 @@ class ChainResolver:
             return tuple(str(model) for model in override)
         return tuple(default)
 
-    def state_for(self, name: str, default: Sequence[str]) -> FallbackState:
+    def policy(self, name: str, default: Sequence[str]) -> FallbackState:
+        runtime = self.config.get("runtime_fallback")
+        runtime = runtime if isinstance(runtime, Mapping) else {}
+
+        def knob(key: str, fallback: Any) -> Any:
+            if key in runtime:
+                return runtime[key]
+            return self.config.get(key, fallback)
+
         return FallbackState(
             chain=self.chain_for(name, default),
-            max_attempts=int(self.config.get("max_fallback_attempts", 3)),
-            cooldown_seconds=int(self.config.get("cooldown_seconds", 30)),
-            restore_primary_after_cooldown=bool(self.config.get("restore_primary_after_cooldown", True)),
+            enabled=bool(knob("enabled", True)),
+            retry_on_errors=parse_retry_on_errors(knob("retry_on_errors", None)),
+            max_attempts=int(knob("max_fallback_attempts", 3)),
+            cooldown_seconds=int(knob("cooldown_seconds", 30)),
+            restore_primary_after_cooldown=bool(knob("restore_primary_after_cooldown", True)),
         )
+
+    def state_for(self, name: str, default: Sequence[str]) -> FallbackState:
+        return self.policy(name, default)
