@@ -65,6 +65,7 @@ One host setting matters for the planning pipeline: Hermes derives a child agent
 
 `omo_task` takes exactly one of `agent=` or `category=`.
 
+Dispatch blocks by default; pass `background=true` to get a `run_id` immediately and poll it with `status`. The run registry is **in-memory and scoped to the session** — `status` lists only runs dispatched in the current one, so history does not survive a session boundary.
 ## Fleet
 
 `roster.py` is the source of truth for who exists and its default model chain. Each agent's persona is `agents/<name>.md`, delivered per dispatch (see below) and loadable in full as `skill_view("omo:<name>")`.
