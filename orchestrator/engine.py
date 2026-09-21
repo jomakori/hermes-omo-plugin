@@ -81,7 +81,7 @@ class OmoEngine:
             if category not in CATEGORIES:
                 raise GuardError(f"Unknown category '{category}'.")
             spec = AGENTS["sisyphus-junior"]
-            return spec.name, tuple(self.chains.chain_for(spec.name, CATEGORIES[category]))
+            return spec.name, tuple(self.chains.category_chain(category, CATEGORIES[category]))
         spec = AGENTS[resolved]
         return spec.name, tuple(self.chains.chain_for(spec.name, spec.chain))
 

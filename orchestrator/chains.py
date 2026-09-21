@@ -119,6 +119,12 @@ class ChainResolver:
             return tuple(str(model) for model in override)
         return tuple(default)
 
+    def category_chain(self, category: str, default: Sequence[str]) -> tuple[str, ...]:
+        override = (self.config.get("categories") or {}).get(category)
+        if override:
+            return tuple(str(model) for model in override)
+        return tuple(default)
+
     def policy(self, name: str, default: Sequence[str]) -> FallbackState:
         runtime = self.config.get("runtime_fallback")
         runtime = runtime if isinstance(runtime, Mapping) else {}

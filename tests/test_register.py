@@ -90,3 +90,26 @@ def test_subagent_start_marks_read_only_and_stop_clears():
 
     stop(session_id="sa-1")
     assert not plugin.READ_ONLY_WORKERS.is_read_only("sa-1")
+
+
+class ConfigCtx(RecordingCtx):
+    def __init__(self, config):
+        super().__init__()
+        self._config = config
+
+    def get_config(self, key, default=None):
+        return self._config.get(key, default)
+
+
+def test_settings_carries_the_fallback_and_category_layers():
+    ctx = ConfigCtx(
+        {
+            "runtime_fallback": {"enabled": True, "retry_on_errors": [402]},
+            "categories": {"quick": ["litellm/x"]},
+            "chains": {"explore": ["litellm/y"]},
+        }
+    )
+    settings = plugin._settings(ctx)
+    assert settings["runtime_fallback"] == {"enabled": True, "retry_on_errors": [402]}
+    assert settings["categories"] == {"quick": ["litellm/x"]}
+    assert settings["chains"] == {"explore": ["litellm/y"]}

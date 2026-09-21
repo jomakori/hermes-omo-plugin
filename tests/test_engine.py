@@ -312,3 +312,10 @@ def test_status_is_extracted_from_the_error_message():
     assert status_from_message("HTTP 400: Invalid model name") == 400
     assert status_from_message("litellm.APIError: 503 service down") == 503
     assert status_from_message("connection reset by peer") is None
+
+
+def test_category_dispatch_uses_the_category_chain():
+    lifecycle = FakeLifecycle()
+    _, engine = make_engine(lifecycle, {"categories": {"quick": ["litellm/claude-haiku-4-5", "litellm/minimax-m3"]}})
+    engine.dispatch(goal="tiny", category="quick")
+    assert lifecycle.launches == ["claude-haiku-4-5"]

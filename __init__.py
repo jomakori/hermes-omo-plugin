@@ -29,7 +29,9 @@ def _settings(ctx: Any) -> dict[str, Any]:
         "max_fallback_attempts": ctx.get_config("max_fallback_attempts", 3),
         "cooldown_seconds": ctx.get_config("cooldown_seconds", 30),
         "restore_primary_after_cooldown": ctx.get_config("restore_primary_after_cooldown", True),
+        "runtime_fallback": ctx.get_config("runtime_fallback", None),
         "chains": ctx.get_config("chains", None),
+        "categories": ctx.get_config("categories", None),
         "enabled_agents": ctx.get_config("enabled_agents", None),
     }
 
