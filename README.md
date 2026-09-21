@@ -72,8 +72,8 @@ Every payload that reports worker activity carries a machine-readable boundary:
 ```json
 "claim_boundary": {
   "boundary": "not_evidence_until_observed",
-  "observed": ["status", "model", "cancelled", "result.terminal_state", "result.usage_metadata", "result.tool_execution_summary"],
-  "self_reported": ["result.summary", "result.structured_payload", "result.error_message"]
+  "observed": ["status", "model", "cancelled", "error", "result.terminal_state", "result.usage_metadata", "result.tool_execution_summary", "result.error_message"],
+  "self_reported": ["result.summary", "result.structured_payload"]
 }
 ```
 

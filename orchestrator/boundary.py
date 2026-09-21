@@ -14,14 +14,18 @@ from typing import Any
 NOT_EVIDENCE_UNTIL_OBSERVED = "not_evidence_until_observed"
 
 # Read from the host's own record of the run: the engine took the worker's word
-# for none of these. Names are field kinds, so a payload may carry only some.
+# for none of these. `error` and `result.error_message` belong here because the
+# host writes them from its own failure path, not the worker. Names are field
+# kinds, so a payload may carry only some of them.
 OBSERVED = (
     "status",
     "model",
     "cancelled",
+    "error",
     "result.terminal_state",
     "result.usage_metadata",
     "result.tool_execution_summary",
+    "result.error_message",
 )
 
 # Authored by the worker. Check it against something the host can see - the
@@ -29,7 +33,6 @@ OBSERVED = (
 SELF_REPORTED = (
     "result.summary",
     "result.structured_payload",
-    "result.error_message",
 )
 
 

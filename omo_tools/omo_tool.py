@@ -8,7 +8,10 @@ OMO_SCHEMA: dict[str, Any] = {
     "name": "omo",
     "description": (
         "Dispatch engineering work to the native OMO agent fleet. Hermes stays the "
-        "sole user-facing agent; workers return structured results."
+        "sole user-facing agent; workers return structured results. A worker's own "
+        "summary is a claim, not evidence: results carry a claim_boundary naming "
+        "what the host observed and what the worker merely asserted, so verify "
+        "before repeating it."
     ),
     "parameters": {
         "type": "object",

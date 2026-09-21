@@ -319,6 +319,10 @@ def test_claim_boundary_separates_observed_from_self_reported():
     assert boundary["boundary"] == NOT_EVIDENCE_UNTIL_OBSERVED
     assert "result.summary" in boundary["self_reported"]
     assert set(boundary["observed"]).isdisjoint(boundary["self_reported"])
+    # Only worker-authored narrative is self-reported: the host writes the error
+    # fields from its own failure path, so a caller must not be told to distrust
+    # them as claims.
+    assert set(boundary["self_reported"]) == {"result.summary", "result.structured_payload"}
 
 
 def test_every_payload_that_reports_worker_activity_carries_the_boundary():
