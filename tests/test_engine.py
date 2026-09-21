@@ -233,7 +233,13 @@ class _FailedState:
 
 class FailingResult:
     terminal_state = _FailedState()
-    error_message = "HTTP 400: Invalid model name passed in model=litellm/x"
+    error_message = "unknown failure with no status or retryable pattern"
+    summary = ""
+
+
+class CreditsResult:
+    terminal_state = _FailedState()
+    error_message = "HTTP 402: litellm.APIError: Add credits to continue"
     summary = ""
 
 
@@ -243,7 +249,33 @@ def test_child_terminal_failure_marks_the_run_failed():
     _, engine = make_engine(lifecycle)
     out = engine.dispatch(goal="scan", target="explore")
     assert out["status"] == "failed"
-    assert "Invalid model name" in out["error"]
+    assert "unknown failure" in out["error"]
+    assert len(lifecycle.launches) == 1
+
+
+def test_child_failure_walks_the_chain_when_retryable():
+    lifecycle = FakeLifecycle()
+    lifecycle.result = lambda handle: CreditsResult()
+    _, engine = make_engine(
+        lifecycle,
+        {
+            "chains": {"explore": ["deepseek-v4-flash", "minimax-m3", "claude-haiku-4-5"]},
+            "runtime_fallback": {"retry_on_errors": [402], "max_fallback_attempts": 3},
+        },
+    )
+    out = engine.dispatch(goal="scan", target="explore")
+    assert lifecycle.launches == ["deepseek-v4-flash", "minimax-m3", "claude-haiku-4-5"]
+    assert out["status"] == "failed"
+    assert "Add credits" in out["error"]
+
+
+def test_child_failure_does_not_walk_when_the_code_is_not_configured():
+    lifecycle = FakeLifecycle()
+    lifecycle.result = lambda handle: CreditsResult()
+    _, engine = make_engine(lifecycle, {"runtime_fallback": {"retry_on_errors": [429]}})
+    out = engine.dispatch(goal="scan", target="explore")
+    assert len(lifecycle.launches) == 1
+    assert out["status"] == "failed"
 
 
 def test_fallback_can_be_disabled():

@@ -153,6 +153,7 @@ class OmoEngine:
         while True:
             worker.model = request.model
             worker.status = RUNNING
+            error = ""
             try:
                 handle = service.launch(request)
                 worker.handle = handle
@@ -167,22 +168,27 @@ class OmoEngine:
                 service.wait(handle, timeout_seconds=self._timeout_seconds())
                 result = service.result(handle)
                 worker.result = result
-                if self._result_failed(result):
-                    worker.status = FAILED
-                    worker.error = self._result_error(result)
-                else:
+                if not self._result_failed(result):
                     worker.status = SUCCEEDED
-                worker.finished_at = time.time()
-                return self._outcome(run, worker)
+                    worker.finished_at = time.time()
+                    return self._outcome(run, worker)
+                error = self._result_error(result)
             except Exception as exc:
-                last_error = str(exc)
-                if not state.retryable(status=status_from_message(last_error), message=last_error):
-                    break
-                state.record_failure(request.model or "")
-                next_model = state.next_model()
-                if next_model is None:
-                    break
-                request = self._with_model(request, next_model)
+                error = str(exc)
+
+            # A child that fails inside itself returns a result rather than raising,
+            # so a provider error (402 credits, 429, 5xx) must walk the chain here
+            # too — otherwise the fallback layer is inert for exactly the failures
+            # it exists to handle.
+            last_error = error
+            if not state.retryable(status=status_from_message(error), message=error):
+                break
+            state.record_failure(request.model or "")
+            next_model = state.next_model()
+            if next_model is None:
+                break
+            request = self._with_model(request, next_model)
+
         worker.status = FAILED
         worker.error = last_error
         worker.finished_at = time.time()
