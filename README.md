@@ -66,6 +66,23 @@ One host setting matters for the planning pipeline: Hermes derives a child agent
 `omo_task` takes exactly one of `agent=` or `category=`.
 
 Dispatch blocks by default; pass `background=true` to get a `run_id` immediately and poll it with `status`. The run registry is **in-memory and scoped to the session** — `status` lists only runs dispatched in the current one, so history does not survive a session boundary.
+
+Every payload that reports worker activity carries a machine-readable boundary:
+
+```json
+"claim_boundary": {
+  "boundary": "not_evidence_until_observed",
+  "observed": ["status", "model", "cancelled", "result.terminal_state", "result.usage_metadata", "result.tool_execution_summary"],
+  "self_reported": ["result.summary", "result.structured_payload", "result.error_message"]
+}
+```
+
+`observed` is what the engine read from the host's own record of the run. `self_reported`
+is what the worker wrote about itself — a claim, not evidence, to be checked against
+something the host can see (the working tree, the tests, git) before it is repeated to the
+user. A worker that says it refactored a module has not thereby refactored it. Validation
+errors (`{"error": "goal is required to dispatch."}`) carry no boundary, because no worker
+ran.
 ## Fleet
 
 `roster.py` is the source of truth for who exists and its default model chain. Each agent's persona is `agents/<name>.md`, delivered per dispatch (see below) and loadable in full as `skill_view("omo:<name>")`.
@@ -96,6 +113,7 @@ A few decisions are worth knowing because they are not obvious:
 - **Personas are delivered, not assumed.** A worker's `agents/<name>.md` goes into its launch `context`, wrapped in an authoritative binding preamble, so the definition actually reaches the model rather than sitting in the repo unread. The host caps a launch's context at 32,000 chars: ten of the eleven fit whole, and `sisyphus` is truncated with a pointer to the full text. Every persona is also registered as a plugin skill — `skill_view("omo:<name>")` — so the complete definition is always retrievable.
 - **No per-agent permission tier.** Hermes derives a child's capabilities from its parent and refuses a launch whose toolsets are not a subset of the parent's. An earlier read-only tier could not be expressed that way, and the `pre_tool_call` guard that stood in for it never fired — it was keyed on a `session_id` the host does not send. It has been removed rather than repaired: every agent runs with the parent's capabilities, and the roster carries no permission field to mislead.
 - **Worker approvals.** Subagent worker threads run non-interactive and refuse dangerous commands by default; ordinary work — files, tests, builds, git — is unaffected.
+- **Registration is unconditional.** `register_tool` is required and fails loudly if the host lacks it; `register_command`, `register_skill` and `on_unload` are each attempted on their own, so a host missing one still gets the others. Nothing branches on a host attribute's presence: an attribute that exists but does nothing would send the whole path down a branch that registers nothing while the plugin still reports as enabled.
 
 ## Relationship to oh-my-openagent
 
