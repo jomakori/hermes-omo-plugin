@@ -67,21 +67,21 @@ One host setting matters for the planning pipeline: Hermes derives a child agent
 
 ## Fleet
 
-`roster.py` is the source of truth for who exists, what each may touch, and its default model chain. Persona prompts live in `agents/<name>.md`.
+`roster.py` is the source of truth for who exists and its default model chain. Each agent's persona is `agents/<name>.md`, delivered per dispatch (see below) and loadable in full as `skill_view("omo:<name>")`.
 
-| Agent | Role | Access |
-|---|---|---|
-| `sisyphus` | Ultraworker | orchestrator |
-| `hephaestus` | Deep Agent | engineering |
-| `prometheus` | Plan Builder | read-only |
-| `atlas` | Plan Executor | orchestrator |
-| `metis` | Plan Consultant | read-only |
-| `momus` | Plan Critic | read-only |
-| `oracle` | Architecture / Reasoning | read-only |
-| `librarian` | Research | read-only |
-| `explore` | Repository Exploration | read-only |
-| `multimodal-looker` | Multimodal Analysis | read-only |
-| `sisyphus-junior` | Specialized Execution Worker | category spawns only |
+| Agent | Role |
+|---|---|
+| `sisyphus` | Ultraworker |
+| `hephaestus` | Deep Agent |
+| `prometheus` | Plan Builder |
+| `atlas` | Plan Executor |
+| `metis` | Plan Consultant |
+| `momus` | Plan Critic |
+| `oracle` | Architecture / Reasoning |
+| `librarian` | Research |
+| `explore` | Repository Exploration |
+| `multimodal-looker` | Multimodal Analysis |
+| `sisyphus-junior` | Specialized Execution Worker |
 
 Categories — `quick`, `deep`, `ultrabrain`, `visual-engineering`, `writing` — spawn the execution worker with a category-specific chain.
 
@@ -92,15 +92,15 @@ Every worker is launched through the host's subagent lifecycle, so it inherits t
 A few decisions are worth knowing because they are not obvious:
 
 - **Per-agent model, not provider.** The host's launch carries `model` only and derives the provider itself. Per-agent fallback is not native either, so it is owned here — a retryable classifier plus a cooldown/restore state machine in `orchestrator/chains.py`.
-- **Read-only is enforced by hook.** The host's `file` toolset bundles read, write and patch into one unit, and per-tool blocking is rejected at launch, so a `pre_tool_call` guard vetoes writes for read-only sessions.
-- **MCP is scoped by toolset.** MCP servers surface as `mcp-<server>` toolsets, so the orchestrator tier can be given the servers the host exposes while the read-only and research tiers are left without them.
+- **Personas are delivered, not assumed.** A worker's `agents/<name>.md` goes into its launch `context`, wrapped in an authoritative binding preamble, so the definition actually reaches the model rather than sitting in the repo unread. The host caps a launch's context at 32,000 chars: ten of the eleven fit whole, and `sisyphus` is truncated with a pointer to the full text. Every persona is also registered as a plugin skill — `skill_view("omo:<name>")` — so the complete definition is always retrievable.
+- **No per-agent permission tier.** Hermes derives a child's capabilities from its parent and refuses a launch whose toolsets are not a subset of the parent's. An earlier read-only tier could not be expressed that way, and the `pre_tool_call` guard that stood in for it never fired — it was keyed on a `session_id` the host does not send. It has been removed rather than repaired: every agent runs with the parent's capabilities, and the roster carries no permission field to mislead.
 - **Worker approvals.** Subagent worker threads run non-interactive and refuse dangerous commands by default; ordinary work — files, tests, builds, git — is unaffected.
 
 ## Relationship to oh-my-openagent
 
 This plugin is an adaptation of [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) (formerly oh-my-opencode) for Hermes.
 
-- **Reused:** the agent roster and personas, the category routing model, and the read-only tool policies.
+- **Reused:** the agent roster and personas, and the category routing model.
 - **Replaced:** OMO's runtime coupling. OMO ships as an OpenCode plugin — OpenCode and Bun, the `@opencode-ai` SDK, an `opencode.json` plugin entry, its lifecycle hooks and its `omo.jsonc` config surface. Here the host's own plugin, delegation and config primitives stand in for all of it, so the same roster runs with nothing extra to install.
 - **Not affiliated:** this is an independent, unofficial adaptation and is not produced or endorsed by OMO's authors.
 

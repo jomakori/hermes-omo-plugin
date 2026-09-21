@@ -8,6 +8,7 @@ from typing import Any
 
 from orchestrator.chains import status_from_message
 from orchestrator.guards import GuardError, check_delegation
+from orchestrator.personas import compose_context
 from roster import AGENTS, CATEGORIES, agent
 
 PENDING = "PENDING"
@@ -107,8 +108,7 @@ class OmoEngine:
         # Children inherit the parent's toolsets: Hermes validates that a launch's
         # allowed_toolsets is a subset of the parent's set and refuses it otherwise
         # ("Requested toolsets would broaden parent permissions"), and the parent's
-        # set is not exposed to plugins. Read-only agents are constrained by the
-        # pre_tool_call guard instead, which does not need a toolset subset.
+        # set is not exposed to plugins.
         request = self._request(goal=goal, context=context, spec=spec, model=worker.model, toolsets=None)
 
         if background:
@@ -133,13 +133,14 @@ class OmoEngine:
     def _request(
         self, *, goal: str, context: str | None, spec: Any, model: str | None, toolsets: tuple[str, ...] | None
     ) -> Any:
+        composed = compose_context(spec.name, context)
         if self._request_factory is not None:
-            return self._request_factory(goal=goal, context=context, spec=spec, model=model, toolsets=toolsets)
+            return self._request_factory(goal=goal, context=composed, spec=spec, model=model, toolsets=toolsets)
         from agent.subagent_lifecycle import SubagentLaunchRequest  # noqa: PLC0415
 
         return SubagentLaunchRequest(
             goal=goal,
-            context=context,
+            context=composed,
             role="orchestrator" if spec.orchestrator else "leaf",
             model=self._normalize_model(model),
             allowed_toolsets=toolsets or None,

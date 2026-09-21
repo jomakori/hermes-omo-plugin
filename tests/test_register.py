@@ -12,6 +12,7 @@ class RecordingCtx:
         self.tools = {}
         self.hooks = {}
         self.commands = {}
+        self.skills = {}
         self.unload = []
         self.subagent_lifecycle = None
 
@@ -24,6 +25,9 @@ class RecordingCtx:
     def register_command(self, name, handler, description=""):
         self.commands[name] = handler
 
+    def register_skill(self, name, path, description=""):
+        self.skills[name] = path
+
     def on_unload(self, callback):
         self.unload.append(callback)
 
@@ -31,7 +35,7 @@ class RecordingCtx:
         return default
 
 
-def test_register_wires_tools_hooks_and_command():
+def test_register_wires_tools_and_command():
     ctx = RecordingCtx()
     plugin.register(ctx)
 
@@ -44,8 +48,9 @@ def test_register_wires_tools_hooks_and_command():
     assert ctx.tools["omo"]["schema"]["parameters"]["required"] == ["action"]
     assert ctx.tools["omo_task"]["schema"]["parameters"]["required"] == ["prompt"]
 
-    assert set(ctx.hooks) == {"pre_tool_call", "subagent_start", "subagent_stop"}
+    assert ctx.hooks == {}
     assert set(ctx.commands) == {"omo"}
+    assert set(ctx.skills) == set(plugin.AGENTS)
     assert len(ctx.unload) == 1
 
 
@@ -77,21 +82,6 @@ def test_handlers_and_command_return_strings():
     assert isinstance(out, str), f"/omo returned {type(out).__name__}, not str"
 
 
-def test_subagent_start_marks_read_only_and_stop_clears():
-    plugin.register(RecordingCtx())
-    start = plugin._on_subagent_start
-    stop = plugin._on_subagent_stop
-
-    start(metadata={"omo_agent": "oracle"}, session_id="sa-1")
-    assert plugin.READ_ONLY_WORKERS.is_read_only("sa-1")
-
-    start(metadata={"omo_agent": "hephaestus"}, session_id="sa-2")
-    assert not plugin.READ_ONLY_WORKERS.is_read_only("sa-2")
-
-    stop(session_id="sa-1")
-    assert not plugin.READ_ONLY_WORKERS.is_read_only("sa-1")
-
-
 class ConfigCtx(RecordingCtx):
     def __init__(self, config):
         super().__init__()
@@ -113,3 +103,37 @@ def test_settings_carries_the_fallback_and_category_layers():
     assert settings["runtime_fallback"] == {"enabled": True, "retry_on_errors": [402]}
     assert settings["categories"] == {"quick": ["litellm/x"]}
     assert settings["chains"] == {"explore": ["litellm/y"]}
+
+
+def test_persona_is_delivered_through_the_launch_context():
+    from orchestrator.personas import compose_context
+
+    composed = compose_context("explore", None)
+    assert composed.startswith('<persona agent="explore" binding="authoritative">')
+    assert composed.rstrip().endswith("</persona>")
+    assert "You are a codebase search specialist." in composed
+
+
+def test_persona_context_keeps_caller_context_and_never_exceeds_the_host_cap():
+    from orchestrator.personas import MAX_CONTEXT_CHARS, compose_context
+
+    composed = compose_context("sisyphus", "caller notes")
+    assert composed is not None
+    assert len(composed) <= MAX_CONTEXT_CHARS
+    assert "caller notes" in composed
+
+
+def test_oversized_persona_is_truncated_with_a_pointer_to_the_full_skill():
+    from orchestrator.personas import MAX_CONTEXT_CHARS, compose_context, persona_text
+
+    assert len(persona_text("sisyphus")) > MAX_CONTEXT_CHARS
+    composed = compose_context("sisyphus", None)
+    assert 'skill_view("omo:sisyphus")' in composed
+    assert len(composed) <= MAX_CONTEXT_CHARS
+
+
+def test_agent_without_a_persona_still_carries_caller_context():
+    from orchestrator.personas import compose_context
+
+    assert compose_context("nope", None) is None
+    assert compose_context("nope", "ctx") == "<task_context>\nctx\n</task_context>"

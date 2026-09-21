@@ -2,7 +2,7 @@ import pytest
 
 import roster
 from orchestrator.chains import FallbackState, canonical_model, is_retryable
-from orchestrator.guards import READ_ONLY_WORKERS, GuardError, check_delegation, read_only_pre_tool_call
+from orchestrator.guards import GuardError, check_delegation
 
 EXPECTED = {
     "sisyphus",
@@ -28,16 +28,6 @@ def test_every_agent_has_a_model_chain():
     for name, spec in roster.AGENTS.items():
         assert spec.chain, f"{name} has no model chain"
         assert all(model.startswith("litellm/") for model in spec.chain), name
-
-
-def test_read_only_tier_matches_omo():
-    read_only = {name for name, spec in roster.AGENTS.items() if spec.read_only}
-    assert read_only == {"oracle", "librarian", "explore", "metis", "momus", "prometheus", "multimodal-looker"}
-
-
-def test_only_orchestrator_tier_gets_mcp():
-    with_mcp = {name for name, spec in roster.AGENTS.items() if spec.mcp}
-    assert with_mcp == {"sisyphus", "hephaestus", "prometheus", "atlas"}
 
 
 def test_sisyphus_junior_is_category_only():
@@ -111,13 +101,3 @@ def test_guard_allows_research_tier():
 
 def test_guard_category_maps_to_junior():
     assert check_delegation(target=None, category="quick") == "sisyphus-junior"
-
-
-def test_read_only_guard_blocks_writes_only_for_marked_sessions():
-    READ_ONLY_WORKERS.mark("sa-1", "oracle")
-    assert read_only_pre_tool_call(tool_name="write_file", session_id="sa-1")["action"] == "block"
-    assert read_only_pre_tool_call(tool_name="patch", session_id="sa-1")["action"] == "block"
-    assert read_only_pre_tool_call(tool_name="read_file", session_id="sa-1") is None
-    assert read_only_pre_tool_call(tool_name="write_file", session_id="other") is None
-    READ_ONLY_WORKERS.clear("sa-1")
-    assert read_only_pre_tool_call(tool_name="write_file", session_id="sa-1") is None

@@ -10,8 +10,4 @@ author: jomakori
 provides_tools:
   - omo
   - omo_task
-provides_hooks:
-  - pre_tool_call
-  - subagent_start
-  - subagent_stop
 kind: standalone

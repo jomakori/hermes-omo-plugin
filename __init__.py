@@ -12,12 +12,8 @@ from omo_tools.omo_task_tool import OMO_TASK_SCHEMA, make_omo_task_handler  # no
 from omo_tools.omo_tool import OMO_SCHEMA, make_omo_handler, render  # noqa: E402
 from orchestrator.chains import ChainResolver  # noqa: E402
 from orchestrator.engine import OmoEngine  # noqa: E402
-from orchestrator.guards import (  # noqa: E402
-    READ_ONLY_WORKERS,
-    GuardError,
-    check_delegation,
-    read_only_pre_tool_call,
-)
+from orchestrator.guards import GuardError, check_delegation  # noqa: E402
+from orchestrator.personas import AGENTS_DIR  # noqa: E402
 from roster import AGENTS  # noqa: E402
 
 PLUGIN_KEY = "omo"
@@ -61,28 +57,14 @@ def register(ctx: Any) -> None:
         is_async=True,
         description="Delegate a subtask to one OMO agent or category worker.",
     )
-    ctx.register_hook("pre_tool_call", read_only_pre_tool_call)
-    ctx.register_hook("subagent_start", _on_subagent_start)
-    ctx.register_hook("subagent_stop", _on_subagent_stop)
     ctx.register_command(
         "omo", handler=lambda *_a, **_k: render(engine.status()), description="Show OMO runs and workers."
     )
+    for name in AGENTS:
+        persona = AGENTS_DIR / f"{name}.md"
+        if persona.is_file():
+            ctx.register_skill(name, persona, description=f"Full OMO persona for {name}")
     ctx.on_unload(engine.shutdown)
-
-
-def _on_subagent_start(**kwargs: Any) -> None:
-    metadata = kwargs.get("metadata") or {}
-    agent_name = str(metadata.get("omo_agent") or "")
-    session_id = str(kwargs.get("session_id") or "")
-    spec = AGENTS.get(agent_name)
-    if spec is not None and spec.read_only and session_id:
-        READ_ONLY_WORKERS.mark(session_id, agent_name)
-
-
-def _on_subagent_stop(**kwargs: Any) -> None:
-    session_id = str(kwargs.get("session_id") or "")
-    if session_id:
-        READ_ONLY_WORKERS.clear(session_id)
 
 
 __all__ = ["register", "PLUGIN_KEY", "GuardError", "check_delegation"]
