@@ -46,6 +46,11 @@ plugins:
         max_fallback_attempts: 3
         cooldown_seconds: 30
         restore_primary_after_cooldown: true
+        max_parallel: 4          # tasks in flight for one graph dispatch
+        max_review_cycles: 1     # reviewer passes per task; 0 disables review
+        enabled_agents: []       # empty = the whole roster; list names to restrict it
+        roles:                   # caller-facing role names -> roster entries
+          implementer: hephaestus
         chains:
           sisyphus:
             - "<provider>/<model>"
@@ -60,7 +65,7 @@ One host setting matters for the planning pipeline: Hermes derives a child agent
 
 | Tool | Purpose |
 |---|---|
-| `omo` | `dispatch` / `status` / `cancel` — the host's entrypoint |
+| `omo` | `dispatch` (one task or a whole graph) / `status` / `tree` / `cancel` |
 | `omo_task` | Delegate one subtask (`agent=`) or spawn a category worker (`category=`) |
 
 `omo_task` takes exactly one of `agent=` or `category=`.
@@ -83,6 +88,57 @@ something the host can see (the working tree, the tests, git) before it is repea
 user. A worker that says it refactored a module has not thereby refactored it. Validation
 errors (`{"error": "goal is required to dispatch."}`) carry no boundary, because no worker
 ran.
+
+## Task graphs
+
+Work with dependencies goes in one call instead of a sequence of dispatches:
+
+```json
+{"action": "dispatch", "goal": "harden the sync path", "review": true, "tasks": [
+  {"id": "recon",  "agent": "explore",  "prompt": "map how sync works today"},
+  {"id": "fix",    "agent": "debugger", "prompt": "fix the race", "depends_on": ["recon"]},
+  {"id": "test",   "agent": "tester",   "prompt": "cover the race", "depends_on": ["fix"]},
+  {"id": "docs",   "agent": "writing",  "prompt": "note the fix", "depends_on": ["fix"]}
+]}
+```
+
+Independent tasks run in parallel, bounded by `max_parallel`; a dependent runs only
+after its dependencies succeed; a dependent of a failed task is reported `BLOCKED`
+and never launched, so a failure cannot silently feed a broken input downstream.
+A declaration is rejected before anything runs if ids repeat, a dependency is
+unknown or points at itself, a cycle exists, or a task carries both `agent` and
+`category` — a rejected graph is rendered as `{"error": ..., "rejected": true}` so
+the caller can fix it and resubmit.
+
+## Review cycles
+
+`"review": true` runs `momus` over each successful task and re-runs that task with
+the reviewer's notes, at most `max_review_cycles` times (`0` disables it). The
+reviewer must answer `{"verdict": "pass"|"problems", "problems": [...]}`; a verdict
+the scheduler cannot parse is treated as a pass rather than as a failure, so an
+unparseable review can never cause an infinite rewrite. Reviewer workers appear in
+the run tree as `<task>:review`.
+
+## Role names
+
+Callers can ask for a role instead of a codename — `explorer`, `researcher`,
+`planner`, `implementer`, `tester`, `debugger`, `reviewer`, `security`,
+`documenter`, `general` — resolved through `ROLE_ALIASES` and overridable with the
+`roles` setting. `documenter` routes to the
+`writing` category and `general` to `quick`, so an alias may point at a category
+as well as an agent — which is the only way to reach `sisyphus-junior`, a worker
+that refuses to be a direct target. Setting `enabled_agents` restricts the
+roster; a disabled agent is refused with the list of what is enabled.
+
+## Worker contract
+
+Every launch context opens with the internal-worker contract: the worker is told it
+is not the assistant, that user-facing communication is disabled, and that its
+findings go back to the orchestrator with what it verified separated from what it
+assumed. This is prepended to the persona (and delivered even when a roster entry
+has no persona), so it cannot be lost by editing a prompt — the host also never
+gives a worker a channel to the user, so the contract states a fact rather than
+asking for compliance.
 ## Fleet
 
 `roster.py` is the source of truth for who exists and its default model chain. Each agent's persona is `agents/<name>.md`, delivered per dispatch (see below) and loadable in full as `skill_view("omo:<name>")`.
@@ -100,17 +156,20 @@ ran.
 | `explore` | Repository Exploration |
 | `multimodal-looker` | Multimodal Analysis |
 | `sisyphus-junior` | Specialized Execution Worker |
+| `tester` | Test Author |
+| `debugger` | Defect Investigator |
+| `security` | Security Reviewer |
 
 Categories — `quick`, `deep`, `ultrabrain`, `visual-engineering`, `writing` — spawn the execution worker with a category-specific chain.
 
 ## How it works
 
-Every worker is launched through the host's subagent lifecycle, so it inherits the host's session record, event stream, transcripts, tool scoping and provider routing. The plugin supplies what the host does not: the roster, per-agent model chains with an owned fallback state machine, per-agent tool scoping, and a run tree the host can print.
+Every worker is launched through the host's subagent lifecycle, so it inherits the host's session record, event stream, transcripts, tool scoping and provider routing. The plugin supplies what the host does not: the roster, per-agent model chains with an owned fallback state machine, a task-graph scheduler, and a run tree the host can print.
 
 A few decisions are worth knowing because they are not obvious:
 
 - **Per-agent model, not provider.** The host's launch carries `model` only and derives the provider itself. Per-agent fallback is not native either, so it is owned here — a retryable classifier plus a cooldown/restore state machine in `orchestrator/chains.py`.
-- **Personas are delivered, not assumed.** A worker's `agents/<name>.md` goes into its launch `context`, wrapped in an authoritative binding preamble, so the definition actually reaches the model rather than sitting in the repo unread. The host caps a launch's context at 32,000 chars: ten of the eleven fit whole, and `sisyphus` is truncated with a pointer to the full text. Every persona is also registered as a plugin skill — `skill_view("omo:<name>")` — so the complete definition is always retrievable.
+- **Personas are delivered, not assumed.** A worker's `agents/<name>.md` goes into its launch `context`, wrapped in an authoritative binding preamble, so the definition actually reaches the model rather than sitting in the repo unread. The host caps a launch's context at 32,000 chars, which every persona fits whole except `sisyphus`, which is truncated with a pointer to the full text. Every persona is also registered as a plugin skill — `skill_view("omo:<name>")` — so the complete definition is always retrievable.
 - **No per-agent permission tier.** Hermes derives a child's capabilities from its parent and refuses a launch whose toolsets are not a subset of the parent's. An earlier read-only tier could not be expressed that way, and the `pre_tool_call` guard that stood in for it never fired — it was keyed on a `session_id` the host does not send. It has been removed rather than repaired: every agent runs with the parent's capabilities, and the roster carries no permission field to mislead.
 - **Worker approvals.** Subagent worker threads run non-interactive and refuse dangerous commands by default; ordinary work — files, tests, builds, git — is unaffected.
 - **Registration is unconditional.** `register_tool` is required and fails loudly if the host lacks it; `register_command`, `register_skill` and `on_unload` are each attempted on their own, so a host missing one still gets the others. Nothing branches on a host attribute's presence: an attribute that exists but does nothing would send the whole path down a branch that registers nothing while the plugin still reports as enabled.
@@ -135,7 +194,7 @@ CI runs the suite, both ruff gates, and a guard that fails if a persona prompt s
 
 ## Attribution
 
-The agent roster, personas, categories and read-only policies originate in [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) by code-yeongyu. The persona prompts under `agents/` are ported from it.
+The agent roster, personas and categories originate in [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) by code-yeongyu. The persona prompts under `agents/` are ported from it.
 
 **License note:** upstream OMO is **not open source**. It is source-available under the **Sustainable Use License v1.0** (SUL-1.0), which permits use and modification for personal or internal business purposes but restricts commercial use and redistribution. The files under `agents/` therefore remain under that licence and are not relicensed here — see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
 

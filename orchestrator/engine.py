@@ -3,62 +3,22 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from dataclasses import dataclass, field
 from typing import Any
 
 from orchestrator.boundary import claim_boundary
 from orchestrator.chains import status_from_message
 from orchestrator.guards import GuardError, check_delegation
+from orchestrator.models import (
+    CANCELLED,
+    FAILED,
+    PENDING,
+    RUNNING,
+    SUCCEEDED,
+    Run,
+    Worker,
+)
 from orchestrator.personas import compose_context
-from roster import AGENTS, CATEGORIES, agent
-
-PENDING = "PENDING"
-RUNNING = "RUNNING"
-SUCCEEDED = "SUCCEEDED"
-FAILED = "FAILED"
-CANCELLED = "CANCELLED"
-
-
-@dataclass
-class Worker:
-    run_id: str
-    agent_name: str
-    task: str
-    chain: tuple[str, ...]
-    model: str | None = None
-    status: str = PENDING
-    handle: Any = None
-    result: Any = None
-    error: str = ""
-    cancel_requested: bool = False
-    started_at: float = field(default_factory=time.time)
-    finished_at: float | None = None
-
-    def as_row(self) -> dict[str, Any]:
-        spec = agent(self.agent_name)
-        return {
-            "agent": spec.display if spec else self.agent_name,
-            "status": self.status,
-            "task": self.task,
-            "model": self.model,
-            "run_id": self.run_id,
-        }
-
-
-@dataclass
-class Run:
-    run_id: str
-    goal: str
-    workers: list[Worker] = field(default_factory=list)
-    created_at: float = field(default_factory=time.time)
-
-    def tree(self) -> str:
-        lines = ["Hermes", f"└── omo run {self.run_id}: {self.goal[:60]}"]
-        for index, worker in enumerate(self.workers):
-            branch = "└──" if index == len(self.workers) - 1 else "├──"
-            row = worker.as_row()
-            lines.append(f"    {branch} {row['agent']} · {row['status']} · {row['model'] or '-'}")
-        return "\n".join(lines)
+from roster import AGENTS, CATEGORIES, ROLE_ALIASES
 
 
 class OmoEngine:
@@ -78,14 +38,70 @@ class OmoEngine:
     def _resolve_target(
         self, *, target: str | None, category: str | None, parent_agent: str | None
     ) -> tuple[str, tuple[str, ...]]:
+        target, category = self._apply_role_alias(target, category)
         resolved = check_delegation(target=target, category=category, parent_agent=parent_agent)
         if category is not None:
             if category not in CATEGORIES:
                 raise GuardError(f"Unknown category '{category}'.")
             spec = AGENTS["sisyphus-junior"]
+            self._check_enabled(spec.name)
             return spec.name, tuple(self.chains.category_chain(category, CATEGORIES[category]))
         spec = AGENTS[resolved]
+        self._check_enabled(spec.name)
         return spec.name, tuple(self.chains.chain_for(spec.name, spec.chain))
+
+    def _apply_role_alias(self, target: str | None, category: str | None) -> tuple[str | None, str | None]:
+        """Resolve caller-facing role names (implementer, documenter, …) to roster entries.
+
+        The roster is OMO's codenames; callers think in roles. Aliases are
+        overridable through the ``roles`` setting, and an alias may point at a
+        category, in which case it is routed as one.
+        """
+        if not target:
+            return target, category
+        aliases = dict(ROLE_ALIASES)
+        configured = self._config("roles", None)
+        if isinstance(configured, dict):
+            aliases.update({str(k).strip().lower(): str(v).strip() for k, v in configured.items()})
+        resolved = aliases.get(target.strip().lower(), target)
+        if resolved in CATEGORIES and category is None:
+            return None, resolved
+        return resolved, category
+
+    def _enabled_agents(self) -> set[str] | None:
+        raw = self._config("enabled_agents", None)
+        if not raw:
+            return None
+        if isinstance(raw, str):
+            raw = raw.split(",")
+        names = {str(name).strip() for name in raw if str(name).strip()}
+        return names or None
+
+    def _check_enabled(self, name: str) -> None:
+        enabled = self._enabled_agents()
+        if enabled is not None and name not in enabled:
+            raise GuardError(f"Agent '{name}' is not enabled. enabled_agents = {', '.join(sorted(enabled))}.")
+
+    def dispatch_graph(
+        self,
+        *,
+        tasks: list[dict[str, Any]],
+        goal: str = "",
+        review: bool = False,
+        max_parallel: int | None = None,
+        max_review_cycles: int | None = None,
+    ) -> dict[str, Any]:
+        """Run a declared dependency graph: parallel where independent, ordered where not."""
+        from orchestrator.graph import TaskGraph
+
+        return TaskGraph(
+            self,
+            tasks,
+            goal=goal,
+            review=review,
+            max_parallel=max_parallel,
+            max_review_cycles=max_review_cycles,
+        ).run()
 
     def dispatch(
         self,
