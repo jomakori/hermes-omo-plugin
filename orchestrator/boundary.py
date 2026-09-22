@@ -33,6 +33,9 @@ OBSERVED = (
 SELF_REPORTED = (
     "result.summary",
     "result.structured_payload",
+    # Derived by the engine from the reviewer's text, so it is still the worker
+    # talking about work - `unparsed` says only that nobody could read a verdict.
+    "workers[].review_verdict",
 )
 
 

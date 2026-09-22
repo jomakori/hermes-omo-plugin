@@ -119,6 +119,22 @@ the scheduler cannot parse is treated as a pass rather than as a failure, so an
 unparseable review can never cause an infinite rewrite. Reviewer workers appear in
 the run tree as `<task>:review`.
 
+Every reviewed task reports what the review actually concluded, in
+`review_verdict`:
+
+| Value | Meaning |
+|---|---|
+| `""` | no review ran |
+| `pass` | the reviewer passed it, or listed no problems |
+| `problems` | the reviewer listed problems; the task was re-run with them |
+| `unparsed` | the reviewer answered, but in a shape the scheduler could not read |
+| `reviewer_failed` | the reviewer never completed |
+
+Only `problems` re-runs a task. The other outcomes leave it exactly as it was —
+but they are named, so "reviewed and clean" is never confused with "the review
+could not be read". The verdict is derived from the reviewer's own text, so the
+claim boundary files it as self-reported.
+
 ## Role names
 
 Callers can ask for a role instead of a codename — `explorer`, `researcher`,
@@ -139,6 +155,12 @@ assumed. This is prepended to the persona (and delivered even when a roster entr
 has no persona), so it cannot be lost by editing a prompt — the host also never
 gives a worker a channel to the user, so the contract states a fact rather than
 asking for compliance.
+
+The clause travels in the launch *context*: a child's system prompt is built by the
+host and a plugin cannot replace it. A live probe (2026-09-22) asked a worker to
+name itself and it answered "Hermes", so treat the wording as guidance rather than a
+guarantee. The guarantee is architectural — a worker has no channel to the user, so
+whatever it calls itself never reaches one.
 ## Fleet
 
 `roster.py` is the source of truth for who exists and its default model chain. Each agent's persona is `agents/<name>.md`, delivered per dispatch (see below) and loadable in full as `skill_view("omo:<name>")`.

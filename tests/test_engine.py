@@ -322,7 +322,11 @@ def test_claim_boundary_separates_observed_from_self_reported():
     # Only worker-authored narrative is self-reported: the host writes the error
     # fields from its own failure path, so a caller must not be told to distrust
     # them as claims.
-    assert set(boundary["self_reported"]) == {"result.summary", "result.structured_payload"}
+    assert set(boundary["self_reported"]) == {
+        "result.summary",
+        "result.structured_payload",
+        "workers[].review_verdict",
+    }
 
 
 def test_every_payload_that_reports_worker_activity_carries_the_boundary():

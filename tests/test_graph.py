@@ -312,6 +312,49 @@ def test_a_failed_reviewer_does_not_drag_the_run_status():
     assert "review impl" in lifecycle.goals(), "the reviewer was attempted"
 
 
+def test_review_verdict_names_each_outcome():
+    """`reviewed and clean` must be distinguishable from `review could not be read`."""
+    cases = [
+        ([FakeResult(), FakeResult(structured_payload={"verdict": "pass"})], 0, "pass"),
+        ([FakeResult(), FakeResult("looks fine to me")], 0, "unparsed"),
+        (
+            [FakeResult(), FakeResult(structured_payload={"verdict": "problems", "problems": ["x"]}), FakeResult()],
+            1,
+            "problems",
+        ),
+        ([FakeResult(), FakeResult(structured_payload={"verdict": "problems", "problems": []})], 0, "pass"),
+    ]
+    for results, cycles, verdict in cases:
+        engine = make_engine(ScriptedLifecycle(results=results))
+        payload = engine.dispatch_graph(
+            tasks=[{"id": "impl", "agent": "tester", "prompt": "p"}], review=True, max_review_cycles=1
+        )
+        row = [r for r in payload["results"] if r["task_id"] == "impl"][0]
+        assert row["review_verdict"] == verdict, verdict
+        reviewer_cycles = [w for w in payload["workers"] if w.get("task_id") == "impl"][0].get("review_cycles", 0)
+        assert reviewer_cycles == cycles, verdict
+
+
+def test_failed_reviewer_is_named_not_assumed_clean():
+    engine = make_engine(ScriptedLifecycle(fail_goals=["review impl"]))
+    payload = engine.dispatch_graph(
+        tasks=[{"id": "impl", "agent": "tester", "prompt": "p"}], review=True, max_review_cycles=1
+    )
+    assert [r for r in payload["results"] if r["task_id"] == "impl"][0]["review_verdict"] == "reviewer_failed"
+
+
+def test_no_review_means_no_verdict():
+    engine = make_engine(ScriptedLifecycle())
+    payload = engine.dispatch_graph(tasks=[{"id": "impl", "agent": "tester", "prompt": "p"}])
+    assert [r for r in payload["results"] if r["task_id"] == "impl"][0]["review_verdict"] == ""
+
+
+def test_worker_contract_answers_the_identity_question():
+    context = compose_context("hephaestus", None)
+    assert "IDENTITY:" in context
+    assert "never Hermes" in context
+
+
 def test_review_is_off_by_default():
     lifecycle = ScriptedLifecycle()
     engine = make_engine(lifecycle, config={"max_review_cycles": 0})
