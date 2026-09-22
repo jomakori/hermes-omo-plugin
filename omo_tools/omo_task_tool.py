@@ -9,9 +9,11 @@ OMO_TASK_SCHEMA: dict[str, Any] = {
     "name": "omo_task",
     "description": (
         "Delegate a subtask to one OMO agent (agent=) or spawn a category worker "
-        "(category=). Provide EXACTLY ONE of agent or category. The worker's own "
-        "summary is a claim, not evidence: results carry a claim_boundary naming "
-        "what the host observed and what the worker merely asserted."
+        "(category=). Provide EXACTLY ONE of agent or category. For work with "
+        "dependencies use the omo tool's tasks= graph instead: this runs a single "
+        "task. The worker's own summary is a claim, not evidence: results carry a "
+        "claim_boundary naming what the host observed and what the worker merely "
+        "asserted."
     ),
     "parameters": {
         "type": "object",
@@ -20,7 +22,9 @@ OMO_TASK_SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "Direct target: explore, librarian, oracle, metis, momus, "
-                    "multimodal-looker, hephaestus, atlas, sisyphus."
+                    "multimodal-looker, hephaestus, atlas, sisyphus, tester, debugger, "
+                    "security — or a role name (explorer, researcher, planner, "
+                    "implementer, tester, debugger, reviewer, security, general)."
                 ),
             },
             "category": {
