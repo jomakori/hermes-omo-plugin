@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import dataclasses
 import json
 import threading
@@ -103,6 +104,21 @@ class ScriptedLifecycle:
         return [launch.goal for launch in self.launches]
 
 
+# The host binds the parent session for a turn in a ContextVar; a worker thread
+# that does not inherit it gets "No active Hermes parent session is available."
+PROBE: contextvars.ContextVar[str] = contextvars.ContextVar("probe", default="unset")
+
+
+class ContextProbeLifecycle(ScriptedLifecycle):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.seen: list[str] = []
+
+    def launch(self, request):
+        self.seen.append(PROBE.get())
+        return super().launch(request)
+
+
 class FakeCtx:
     def __init__(self, lifecycle, config=None):
         self.subagent_lifecycle = lifecycle
@@ -160,6 +176,25 @@ def test_graph_runs_independent_tasks_in_parallel():
 
     assert payload["status"] == "succeeded"
     assert lifecycle.peak == 2, "independent tasks should overlap"
+
+
+def test_graph_tasks_inherit_the_callers_context():
+    """Dependency work must run inside the turn's context, not a bare thread."""
+    token = PROBE.set("bound")
+    try:
+        lifecycle = ContextProbeLifecycle()
+        engine = make_engine(lifecycle)
+        engine.dispatch_graph(
+            tasks=[
+                {"id": "a", "agent": "explore", "prompt": "task a"},
+                {"id": "b", "agent": "tester", "prompt": "task b", "depends_on": ["a"]},
+            ],
+            max_parallel=2,
+        )
+    finally:
+        PROBE.reset(token)
+
+    assert lifecycle.seen == ["bound", "bound"], f"worker context not inherited: {lifecycle.seen}"
 
 
 def test_graph_blocks_dependents_of_a_failed_task():
