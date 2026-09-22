@@ -7,6 +7,7 @@ decides what may run when, and what happens when a task comes back with problems
 
 from __future__ import annotations
 
+import contextvars
 import dataclasses
 import json
 import time
@@ -144,7 +145,12 @@ class TaskGraph:
                         worker.finished_at = time.time()
                         settled[task_id] = False
                         continue
-                    in_flight[pool.submit(self._run_one, run, worker)] = task_id
+                    # Threads do not inherit ContextVars, and the host resolves the
+                    # active parent session from one (agent/subagent_lifecycle), so a
+                    # bare submit has every launch refused with "No active Hermes
+                    # parent session is available." Run each task inside a copy of the
+                    # caller's context.
+                    in_flight[pool.submit(contextvars.copy_context().run, self._run_one, run, worker)] = task_id
                 if not in_flight:
                     # Nothing runnable and nothing running: the remainder is blocked
                     # behind a failure (cycles are rejected in _validate).
