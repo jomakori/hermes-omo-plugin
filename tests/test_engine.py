@@ -310,3 +310,43 @@ def test_category_dispatch_uses_the_category_chain():
     _, engine = make_engine(lifecycle, {"categories": {"quick": ["litellm/claude-haiku-4-5", "litellm/minimax-m3"]}})
     engine.dispatch(goal="tiny", category="quick")
     assert lifecycle.launches == ["claude-haiku-4-5"]
+
+
+def test_claim_boundary_separates_observed_from_self_reported():
+    from orchestrator.boundary import NOT_EVIDENCE_UNTIL_OBSERVED, claim_boundary
+
+    boundary = claim_boundary()
+    assert boundary["boundary"] == NOT_EVIDENCE_UNTIL_OBSERVED
+    assert "result.summary" in boundary["self_reported"]
+    assert set(boundary["observed"]).isdisjoint(boundary["self_reported"])
+    # Only worker-authored narrative is self-reported: the host writes the error
+    # fields from its own failure path, so a caller must not be told to distrust
+    # them as claims.
+    assert set(boundary["self_reported"]) == {"result.summary", "result.structured_payload"}
+
+
+def test_every_payload_that_reports_worker_activity_carries_the_boundary():
+    lifecycle = FakeLifecycle()
+    ctx, engine = make_engine(lifecycle)
+    succeeded = engine.dispatch(goal="scan the repo", target="explore")
+    background = engine.dispatch(goal="long job", target="hephaestus", background=True)
+    run_id = succeeded["run_id"]
+
+    _, failing_engine = make_engine(FakeLifecycle(fail_times=99))
+    failed = failing_engine.dispatch(goal="scan", target="explore")
+
+    for payload in (
+        succeeded,
+        failed,
+        background,
+        engine.status(run_id),
+        engine.status(),
+        engine.cancel(run_id),
+    ):
+        boundary = payload["claim_boundary"]
+        assert boundary["boundary"] == "not_evidence_until_observed"
+        assert "status" in boundary["observed"]
+        assert "result.summary" in boundary["self_reported"]
+
+    for coro in ctx.spawned:
+        asyncio.run(coro)

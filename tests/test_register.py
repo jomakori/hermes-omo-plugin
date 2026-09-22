@@ -2,6 +2,8 @@ import asyncio
 import pathlib
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import __init__ as plugin
@@ -137,3 +139,53 @@ def test_agent_without_a_persona_still_carries_caller_context():
 
     assert compose_context("nope", None) is None
     assert compose_context("nope", "ctx") == "<task_context>\nctx\n</task_context>"
+
+
+class RequiredSurfaceOnlyCtx:
+    """A host that exposes only what registration cannot live without."""
+
+    def __init__(self):
+        self.tools = {}
+        self.subagent_lifecycle = None
+
+    def register_tool(self, **kwargs):
+        self.tools[kwargs["name"]] = kwargs
+
+    def get_config(self, key, default=None):
+        return default
+
+
+class InertAttributeCtx(RecordingCtx):
+    """Presence of a surface we do not use must not decide what we register.
+
+    rlaope's plugin branched on `hasattr(ctx, "register_memory_provider")` and took
+    the branch for an attribute the host had added but not implemented, so every
+    tool and hook registered nowhere while the plugin still reported as enabled.
+    """
+
+    register_memory_provider = None
+
+
+def test_optional_surfaces_are_skipped_individually_not_as_a_group():
+    ctx = RequiredSurfaceOnlyCtx()
+    plugin.register(ctx)
+    assert set(ctx.tools) == {"omo", "omo_task"}
+
+
+def test_registration_never_branches_on_a_host_attribute_we_do_not_use():
+    ctx = InertAttributeCtx()
+    plugin.register(ctx)
+    assert set(ctx.tools) == {"omo", "omo_task"}
+    assert set(ctx.commands) == {"omo"}
+    assert set(ctx.skills) == set(plugin.AGENTS)
+    assert len(ctx.unload) == 1
+
+
+def test_a_missing_required_surface_fails_loudly():
+
+    class NoToolRegistration:
+        def get_config(self, key, default=None):
+            return default
+
+    with pytest.raises(AttributeError):
+        plugin.register(NoToolRegistration())

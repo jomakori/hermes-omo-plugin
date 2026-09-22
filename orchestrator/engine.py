@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from orchestrator.boundary import claim_boundary
 from orchestrator.chains import status_from_message
 from orchestrator.guards import GuardError, check_delegation
 from orchestrator.personas import compose_context
@@ -120,6 +121,7 @@ class OmoEngine:
                 "agent": spec.display,
                 "model": worker.model,
                 "tree": run.tree(),
+                "claim_boundary": claim_boundary(),
             }
 
         return self._run_sync(run, worker, request)
@@ -233,6 +235,7 @@ class OmoEngine:
             "result": worker.result,
             "error": worker.error,
             "tree": run.tree(),
+            "claim_boundary": claim_boundary(),
         }
 
     async def _run_worker(self, run: Run, worker: Worker, request: Any) -> None:
@@ -257,8 +260,16 @@ class OmoEngine:
             run = self.runs.get(run_id)
             if run is None:
                 return {"error": f"unknown run {run_id}"}
-            return {"run_id": run_id, "tree": run.tree(), "workers": [w.as_row() for w in run.workers]}
-        return {"runs": [{"run_id": r.run_id, "tree": r.tree()} for r in self.runs.values()]}
+            return {
+                "run_id": run_id,
+                "tree": run.tree(),
+                "workers": [w.as_row() for w in run.workers],
+                "claim_boundary": claim_boundary(),
+            }
+        return {
+            "runs": [{"run_id": r.run_id, "tree": r.tree()} for r in self.runs.values()],
+            "claim_boundary": claim_boundary(),
+        }
 
     def cancel(self, run_id: str, reason: str = "cancelled by Hermes") -> dict[str, Any]:
         run = self.runs.get(run_id)
@@ -277,7 +288,12 @@ class OmoEngine:
                     pass
             worker.status = CANCELLED
             cancelled += 1
-        return {"run_id": run_id, "cancelled": cancelled, "tree": run.tree()}
+        return {
+            "run_id": run_id,
+            "cancelled": cancelled,
+            "tree": run.tree(),
+            "claim_boundary": claim_boundary(),
+        }
 
     def shutdown(self) -> None:
         for run in list(self.runs.values()):

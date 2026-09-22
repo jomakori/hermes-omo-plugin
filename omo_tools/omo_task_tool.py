@@ -9,7 +9,9 @@ OMO_TASK_SCHEMA: dict[str, Any] = {
     "name": "omo_task",
     "description": (
         "Delegate a subtask to one OMO agent (agent=) or spawn a category worker "
-        "(category=). Provide EXACTLY ONE of agent or category."
+        "(category=). Provide EXACTLY ONE of agent or category. The worker's own "
+        "summary is a claim, not evidence: results carry a claim_boundary naming "
+        "what the host observed and what the worker merely asserted."
     ),
     "parameters": {
         "type": "object",

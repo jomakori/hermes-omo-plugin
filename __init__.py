@@ -32,6 +32,22 @@ def _settings(ctx: Any) -> dict[str, Any]:
     }
 
 
+def _register_optional(ctx: Any, surface: str, *args: Any, **kwargs: Any) -> bool:
+    """Attempt one optional surface, independently of every other.
+
+    A host that does not expose a surface must not cost us the ones it does.
+    Required surfaces stay direct calls, so a missing one fails loudly; what is
+    avoided is branching the whole path on a host attribute - an attribute that
+    exists but does nothing would register nothing at all while the plugin still
+    reports as enabled.
+    """
+    register = getattr(ctx, surface, None)
+    if not callable(register):
+        return False
+    register(*args, **kwargs)
+    return True
+
+
 def register(ctx: Any) -> None:
     engine = OmoEngine(ctx)
     engine.chains = ChainResolver(_settings(ctx))
@@ -57,14 +73,18 @@ def register(ctx: Any) -> None:
         is_async=True,
         description="Delegate a subtask to one OMO agent or category worker.",
     )
-    ctx.register_command(
-        "omo", handler=lambda *_a, **_k: render(engine.status()), description="Show OMO runs and workers."
+    _register_optional(
+        ctx,
+        "register_command",
+        "omo",
+        handler=lambda *_a, **_k: render(engine.status()),
+        description="Show OMO runs and workers.",
     )
     for name in AGENTS:
         persona = AGENTS_DIR / f"{name}.md"
         if persona.is_file():
-            ctx.register_skill(name, persona, description=f"Full OMO persona for {name}")
-    ctx.on_unload(engine.shutdown)
+            _register_optional(ctx, "register_skill", name, persona, description=f"Full OMO persona for {name}")
+    _register_optional(ctx, "on_unload", engine.shutdown)
 
 
 __all__ = ["register", "PLUGIN_KEY", "GuardError", "check_delegation"]
