@@ -40,6 +40,7 @@ class Worker:
     depends_on: tuple[str, ...] = ()
     parent_id: str = ""
     review_cycles: int = 0
+    review_verdict: str = ""
 
     def as_row(self) -> dict[str, Any]:
         spec = agent(self.agent_name)
@@ -58,6 +59,8 @@ class Worker:
             row["parent"] = self.parent_id
         if self.review_cycles:
             row["review_cycles"] = self.review_cycles
+        if self.review_verdict:
+            row["review_verdict"] = self.review_verdict
         return row
 
 

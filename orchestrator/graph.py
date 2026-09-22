@@ -180,8 +180,9 @@ class TaskGraph:
     def _review_loop(self, run: Run, worker: Worker, request: Any) -> None:
         engine = self.engine
         for cycle in range(1, self.max_review_cycles + 1):
-            problems = self._review_once(run, worker)
-            if not problems:
+            verdict, problems = self._review_once(run, worker)
+            worker.review_verdict = verdict
+            if verdict != "problems" or not problems:
                 return
             worker.review_cycles = cycle
             worker.status = RETRYING
@@ -190,7 +191,7 @@ class TaskGraph:
             if worker.status != SUCCEEDED:
                 return
 
-    def _review_once(self, run: Run, worker: Worker) -> str:
+    def _review_once(self, run: Run, worker: Worker) -> tuple[str, str]:
         engine = self.engine
         spec = AGENTS[REVIEW_AGENT]
         chain = tuple(engine._normalize_model(model) or model for model in spec.chain)
@@ -214,8 +215,8 @@ class TaskGraph:
         request = engine._request(goal=reviewer.task, context=material, spec=spec, model=reviewer.model, toolsets=None)
         engine._run_sync(run, reviewer, request)
         if reviewer.status != SUCCEEDED:
-            return ""
-        return self._problems(reviewer)
+            return "reviewer_failed", ""
+        return self._verdict(reviewer)
 
     @staticmethod
     def _result_text(worker: Worker) -> str:
@@ -227,7 +228,15 @@ class TaskGraph:
         return str(result or worker.error or "")
 
     @classmethod
-    def _problems(cls, reviewer: Worker) -> str:
+    def _verdict(cls, reviewer: Worker) -> tuple[str, str]:
+        """Name the review outcome: pass, problems, or a verdict nobody could read.
+
+        An unreadable verdict is not a pass by intent — it is recorded as
+        `unparsed` so the caller can tell "reviewed and clean" from "review ran and
+        said something the scheduler could not use". Both leave the task alone;
+        only `problems` re-runs it.
+        """
+
         payload = getattr(reviewer.result, "structured_payload", None)
         if payload is None:
             payload = cls._result_text(reviewer)
@@ -235,15 +244,14 @@ class TaskGraph:
             try:
                 payload = json.loads(payload)
             except (ValueError, TypeError):
-                return ""  # unparseable verdict is not a failure reason
+                return "unparsed", ""
         if not isinstance(payload, dict):
-            return ""
+            return "unparsed", ""
         if str(payload.get("verdict", "")).lower() != "problems":
-            return ""
+            return "pass", ""
         problems = payload.get("problems") or []
-        if isinstance(problems, str):
-            return problems
-        return "\n".join(str(p) for p in problems)
+        text = problems if isinstance(problems, str) else "\n".join(str(p) for p in problems)
+        return ("problems", text) if text else ("pass", "")
 
     # ── payload ───────────────────────────────────────────────────────
     def _payload(self, run: Run) -> dict[str, Any]:
@@ -263,7 +271,13 @@ class TaskGraph:
             "tree": run.tree(),
             "workers": [w.as_row() for w in run.workers],
             "results": [
-                {"task_id": w.task_id, "status": w.status, "error": w.error, "result": w.result}
+                {
+                    "task_id": w.task_id,
+                    "status": w.status,
+                    "error": w.error,
+                    "review_verdict": w.review_verdict,
+                    "result": w.result,
+                }
                 for w in run.workers
                 if w.task_id and not w.task_id.endswith(":review")
             ],
