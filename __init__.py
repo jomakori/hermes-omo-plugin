@@ -21,7 +21,6 @@ PLUGIN_KEY = "omo"
 
 def _settings(ctx: Any) -> dict[str, Any]:
     return {
-        "mcp_enabled": ctx.get_config("mcp_enabled", True),
         "max_fallback_attempts": ctx.get_config("max_fallback_attempts", 3),
         "cooldown_seconds": ctx.get_config("cooldown_seconds", 30),
         "restore_primary_after_cooldown": ctx.get_config("restore_primary_after_cooldown", True),
