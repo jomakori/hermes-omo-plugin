@@ -68,12 +68,6 @@ class Run:
     workers: list[Worker] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
-    def worker_for(self, task_id: str) -> Worker | None:
-        for worker in self.workers:
-            if worker.task_id == task_id:
-                return worker
-        return None
-
     def tree(self) -> str:
         lines = ["Hermes", f"└── omo run {self.run_id}: {self.goal[:60]}"]
         for index, worker in enumerate(self.workers):

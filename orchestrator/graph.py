@@ -241,7 +241,10 @@ class TaskGraph:
 
     # ── payload ───────────────────────────────────────────────────────
     def _payload(self, run: Run) -> dict[str, Any]:
-        statuses = [w.status for w in run.workers]
+        # Reviewer rows are reporting, not work: a review that failed to run leaves
+        # the task's verdict as it was (see _review_once), so it must not drag the
+        # run's overall status either. The row stays in the tree.
+        statuses = [w.status for w in run.workers if not w.task_id.endswith(":review")]
         if all(s == SUCCEEDED for s in statuses):
             overall = "succeeded"
         elif any(s == SUCCEEDED for s in statuses):

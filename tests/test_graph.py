@@ -57,10 +57,11 @@ def request_factory(*, goal, context, spec, model, toolsets):
 class ScriptedLifecycle:
     """One scripted result per launch, in launch order."""
 
-    def __init__(self, results=None, always_fail=False, delay=0.0):
+    def __init__(self, results=None, always_fail=False, delay=0.0, fail_goals=()):
         self.results = list(results or [])
         self.always_fail = always_fail
         self.delay = delay
+        self.fail_goals = set(fail_goals)
         self.launches: list[FakeRequest] = []
         self.peak = 0
         self._inflight = 0
@@ -72,7 +73,7 @@ class ScriptedLifecycle:
             self.launches.append(request)
             self._inflight += 1
             self.peak = max(self.peak, self._inflight)
-        if self.always_fail:
+        if self.always_fail or request.goal in self.fail_goals:
             with self._lock:
                 self._inflight -= 1
             raise RuntimeError("402 payment required: add credits to continue")
@@ -259,6 +260,23 @@ def test_review_stops_at_the_configured_bound():
     assert row["review_cycles"] == 2
 
 
+def test_a_failed_reviewer_does_not_drag_the_run_status():
+    """A review that could not run leaves the task as it was, and says so in the tree."""
+    lifecycle = ScriptedLifecycle(fail_goals=["review impl"])
+    engine = make_engine(lifecycle)
+    payload = engine.dispatch_graph(
+        tasks=[{"id": "impl", "agent": "hephaestus", "prompt": "implement"}],
+        review=True,
+        max_review_cycles=1,
+    )
+
+    assert payload["status"] == "succeeded", "the task succeeded; its reviewer did not run"
+    reviewer = [row for row in payload["workers"] if row.get("task_id") == "impl:review"][0]
+    assert reviewer["status"] == "FAILED", "a dead reviewer must still be visible"
+    assert lifecycle.goals().count("implement") == 1, "a review that never ran must not re-run the task"
+    assert "review impl" in lifecycle.goals(), "the reviewer was attempted"
+
+
 def test_review_is_off_by_default():
     lifecycle = ScriptedLifecycle()
     engine = make_engine(lifecycle, config={"max_review_cycles": 0})
@@ -291,9 +309,13 @@ def test_role_aliases_are_configurable():
     assert "atlas" in engine.dispatch(goal="build it", target="implementer")["agent"]
 
 
-def test_every_requested_role_has_a_target():
+def test_every_requested_role_dispatches():
+    """A role in the schema and the README must survive a dispatch, not just resolve."""
     for role, target in ROLE_ALIASES.items():
         assert target in AGENTS or target in {"quick", "deep", "ultrabrain", "visual-engineering", "writing"}, role
+        engine = make_engine(ScriptedLifecycle())
+        outcome = engine.dispatch(goal=f"probe {role}", target=role)
+        assert outcome["status"] == "succeeded", f"{role} failed to dispatch: {outcome['error']}"
 
 
 def test_every_roster_entry_has_a_persona():

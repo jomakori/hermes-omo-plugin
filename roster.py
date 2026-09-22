@@ -129,7 +129,9 @@ ROLE_ALIASES: dict[str, str] = {
     "reviewer": "momus",
     "security": "security",
     "documenter": "writing",
-    "general": "sisyphus-junior",
+    # sisyphus-junior refuses to be a direct target, so the general role goes
+    # through the category path that reaches it.
+    "general": "quick",
 }
 
 CATEGORIES: dict[str, tuple[str, ...]] = {

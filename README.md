@@ -124,8 +124,10 @@ the run tree as `<task>:review`.
 Callers can ask for a role instead of a codename — `explorer`, `researcher`,
 `planner`, `implementer`, `tester`, `debugger`, `reviewer`, `security`,
 `documenter`, `general` — resolved through `ROLE_ALIASES` and overridable with the
-`roles` setting. `documenter` routes to the `writing` category, so a role alias may
-point at a category as well as an agent. Setting `enabled_agents` restricts the
+`roles` setting. `documenter` routes to the
+`writing` category and `general` to `quick`, so an alias may point at a category
+as well as an agent — which is the only way to reach `sisyphus-junior`, a worker
+that refuses to be a direct target. Setting `enabled_agents` restricts the
 roster; a disabled agent is refused with the list of what is enabled.
 
 ## Worker contract
@@ -162,7 +164,7 @@ Categories — `quick`, `deep`, `ultrabrain`, `visual-engineering`, `writing` �
 
 ## How it works
 
-Every worker is launched through the host's subagent lifecycle, so it inherits the host's session record, event stream, transcripts, tool scoping and provider routing. The plugin supplies what the host does not: the roster, per-agent model chains with an owned fallback state machine, per-agent tool scoping, and a run tree the host can print.
+Every worker is launched through the host's subagent lifecycle, so it inherits the host's session record, event stream, transcripts, tool scoping and provider routing. The plugin supplies what the host does not: the roster, per-agent model chains with an owned fallback state machine, a task-graph scheduler, and a run tree the host can print.
 
 A few decisions are worth knowing because they are not obvious:
 
