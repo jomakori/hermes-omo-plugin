@@ -97,6 +97,39 @@ AGENTS: dict[str, AgentSpec] = {
         (L + "deepseek-v4-flash", L + "minimax-m3", L + "claude-haiku-4-5", L + "bytedance-deepseek-v4-flash"),
         accepts_subagent_type=False,
     ),
+    "tester": AgentSpec(
+        "tester",
+        "Test Author",
+        "subagent",
+        (L + "deepseek-v4-flash", L + "minimax-m3", L + "claude-sonnet-5", L + "bytedance-dola-seed-2.0-code"),
+    ),
+    "debugger": AgentSpec(
+        "debugger",
+        "Defect Investigator",
+        "subagent",
+        (L + "minimax-m3", L + "deepseek-v4-pro", L + "claude-sonnet-5", L + "bytedance-dola-seed-2.0-pro"),
+    ),
+    "security": AgentSpec(
+        "security",
+        "Security Reviewer",
+        "subagent",
+        (L + "deepseek-v4-pro", L + "claude-sonnet-5", L + "glm-5.3", L + "bytedance-dola-seed-2.0-pro"),
+    ),
+}
+
+# Request-facing role names. The roster keeps OMO's codenames; callers may ask for
+# a role instead. Overridable at runtime through the ``roles`` setting.
+ROLE_ALIASES: dict[str, str] = {
+    "explorer": "explore",
+    "researcher": "librarian",
+    "planner": "prometheus",
+    "implementer": "hephaestus",
+    "tester": "tester",
+    "debugger": "debugger",
+    "reviewer": "momus",
+    "security": "security",
+    "documenter": "writing",
+    "general": "sisyphus-junior",
 }
 
 CATEGORIES: dict[str, tuple[str, ...]] = {

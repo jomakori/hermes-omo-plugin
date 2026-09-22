@@ -16,12 +16,15 @@ EXPECTED = {
     "explore",
     "multimodal-looker",
     "sisyphus-junior",
+    "tester",
+    "debugger",
+    "security",
 }
 
 
 def test_roster_is_complete_and_unique():
     assert set(roster.AGENTS) == EXPECTED
-    assert len(roster.AGENTS) == 11
+    assert len(roster.AGENTS) == 14
 
 
 def test_every_agent_has_a_model_chain():
