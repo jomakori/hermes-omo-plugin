@@ -395,6 +395,41 @@ def test_tool_dispatches_a_graph_and_renders_its_tree():
     assert "task_id" in rendered
 
 
+def test_tool_reviews_a_single_task_when_asked():
+    """The review controls must not be accepted and then ignored on the single path."""
+    lifecycle = ScriptedLifecycle(
+        results=[
+            FakeResult("first"),
+            FakeResult(structured_payload={"verdict": "problems", "problems": ["no test"]}),
+            FakeResult("second"),
+        ]
+    )
+    engine = make_engine(lifecycle)
+    payload = json.loads(
+        asyncio.run(
+            make_omo_handler(engine)(
+                {
+                    "action": "dispatch",
+                    "goal": "single task",
+                    "agent": "tester",
+                    "review": True,
+                    "max_review_cycles": 1,
+                }
+            )
+        )
+    )
+
+    reviewed = [row for row in payload["workers"] if row.get("task_id") == "task-1"][0]
+    assert reviewed["review_cycles"] == 1, "the review must actually have run"
+    assert len(lifecycle.launches) == 3, "implement, review, re-implement"
+
+
+def test_tool_keeps_the_plain_path_without_review_controls():
+    engine = make_engine(ScriptedLifecycle())
+    payload = json.loads(asyncio.run(make_omo_handler(engine)({"action": "dispatch", "goal": "x", "agent": "explore"})))
+    assert "agent" in payload and "workers" not in payload
+
+
 def test_tool_renders_a_rejected_graph_instead_of_raising():
     engine = make_engine(ScriptedLifecycle())
     payload = json.loads(

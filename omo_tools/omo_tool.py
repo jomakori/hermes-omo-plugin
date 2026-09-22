@@ -110,6 +110,32 @@ def make_omo_handler(engine: Any) -> Callable[..., Any]:
             goal = str(params.get("goal") or "").strip()
             if not goal:
                 return render({"error": "goal or tasks is required to dispatch."})
+            if (
+                params.get("review")
+                or params.get("max_review_cycles") is not None
+                or params.get("max_parallel") is not None
+            ):
+                # A single task can be reviewed too. Route it through the graph
+                # machinery instead of accepting the controls and ignoring them.
+                try:
+                    return render(
+                        engine.dispatch_graph(
+                            tasks=[
+                                {
+                                    "id": "task-1",
+                                    "agent": params.get("agent"),
+                                    "category": params.get("category"),
+                                    "prompt": goal,
+                                }
+                            ],
+                            goal=goal,
+                            review=bool(params.get("review", False)),
+                            max_parallel=params.get("max_parallel"),
+                            max_review_cycles=params.get("max_review_cycles"),
+                        )
+                    )
+                except GuardError as exc:
+                    return render({"error": str(exc), "rejected": True})
             return render(
                 engine.dispatch(
                     goal=goal,
