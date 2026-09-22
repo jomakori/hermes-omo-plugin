@@ -111,7 +111,10 @@ def test_persona_is_delivered_through_the_launch_context():
     from orchestrator.personas import compose_context
 
     composed = compose_context("explore", None)
-    assert composed.startswith('<persona agent="explore" binding="authoritative">')
+    # The internal-worker contract is prepended to every launch context; the
+    # persona follows it.
+    assert composed.startswith("<internal_worker>")
+    assert '<persona agent="explore" binding="authoritative">' in composed
     assert composed.rstrip().endswith("</persona>")
     assert "You are a codebase search specialist." in composed
 
@@ -134,11 +137,13 @@ def test_oversized_persona_is_truncated_with_a_pointer_to_the_full_skill():
     assert len(composed) <= MAX_CONTEXT_CHARS
 
 
-def test_agent_without_a_persona_still_carries_caller_context():
+def test_agent_without_a_persona_still_carries_the_contract_and_caller_context():
     from orchestrator.personas import compose_context
 
-    assert compose_context("nope", None) is None
-    assert compose_context("nope", "ctx") == "<task_context>\nctx\n</task_context>"
+    # Even without a persona the worker is told it is an internal worker, so the
+    # contract cannot be lost by a roster change.
+    assert "USER-FACING COMMUNICATION: DISABLED" in compose_context("nope", None)
+    assert compose_context("nope", "ctx").rstrip().endswith("<task_context>\nctx\n</task_context>")
 
 
 class RequiredSurfaceOnlyCtx:
