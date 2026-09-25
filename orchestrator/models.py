@@ -41,6 +41,7 @@ class Worker:
     parent_id: str = ""
     review_cycles: int = 0
     review_verdict: str = ""
+    hop_history: list[dict[str, str]] = field(default_factory=list)
 
     def as_row(self) -> dict[str, Any]:
         spec = agent(self.agent_name)
@@ -61,6 +62,8 @@ class Worker:
             row["review_cycles"] = self.review_cycles
         if self.review_verdict:
             row["review_verdict"] = self.review_verdict
+        if self.hop_history:
+            row["hop_history"] = self.hop_history
         return row
 
 
