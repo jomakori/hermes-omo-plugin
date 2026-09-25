@@ -8,10 +8,23 @@ from typing import Any
 
 RETRYABLE_STATUS: frozenset[int] = frozenset({400, 401, 403, 404, 408, 425, 429, 500, 502, 503, 504, 529})
 NON_RETRYABLE: frozenset[str] = frozenset({"abort", "context_overflow"})
+HOP_REASON_TRANSPORT = "transport"
+HOP_REASON_RATE_LIMIT = "rate_limit"
+HOP_REASON_SEMANTIC = "semantic"
+HOP_REASON_SUCCESS = "success"
+# Credits-out is its own bucket: it is the dominant failure on this stack and it
+# is not fixable by retrying or by another hop on the same drained account.
+HOP_REASON_BILLING = "billing"
 
 _RETRYABLE_PATTERN = re.compile(
     r"rate.?limit|quota|overloaded|too many requests|temporarily unavailable|"
     r"service unavailable|bad gateway|gateway timeout",
+    re.IGNORECASE,
+)
+
+# A depleted provider answers 402, or wraps the same billing body in 403/404/429.
+_BILLING_PATTERN = re.compile(
+    r"insufficient (?:balance|funds)|add credits|can only afford|payment required|billing|out of funds",
     re.IGNORECASE,
 )
 
@@ -34,6 +47,28 @@ _CLIENT_DISCONNECT_PATTERN = re.compile(
 def status_from_message(message: str | None) -> int | None:
     match = _STATUS_IN_MESSAGE.search(message or "")
     return int(match.group(1)) if match else None
+
+
+def classify_failure_reason(*, status: int | None = None, error_type: str | None = None, message: str = "") -> str:
+    """Why one hop was abandoned: billing, rate_limit, transport, or semantic.
+
+    Billing is tested before the retryable patterns because a credit body often
+    arrives wrapped in a retryable status, and a drained account must not be
+    recorded as a transient one.
+    """
+    if error_type in NON_RETRYABLE:
+        return HOP_REASON_SEMANTIC
+    if status == 402 or _BILLING_PATTERN.search(message or ""):
+        return HOP_REASON_BILLING
+    if status == 429:
+        return HOP_REASON_RATE_LIMIT
+    if status and status >= 500:
+        return HOP_REASON_TRANSPORT
+    if _RETRYABLE_PATTERN.search(message or ""):
+        if "rate" in message.lower() or "quota" in message.lower() or "too many" in message.lower():
+            return HOP_REASON_RATE_LIMIT
+        return HOP_REASON_TRANSPORT
+    return HOP_REASON_SEMANTIC
 
 
 def client_disconnected(message: str | None) -> bool:
@@ -90,6 +125,9 @@ class FallbackState:
     current_index: int = 0
     attempt_count: int = 0
     cooldowns: dict[str, float] = field(default_factory=dict)
+    # Per-hop outcome of this walk, in order, as {model, reason}: copied onto the
+    # worker row so a cascade is legible after the fact.
+    hop_history: list[dict[str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.original and self.chain:
@@ -122,9 +160,16 @@ class FallbackState:
             return candidate
         return None
 
-    def record_failure(self, model: str, *, now: float | None = None) -> None:
+    def record_failure(self, model: str, *, now: float | None = None, reason: str | None = None) -> None:
+        """Bench the model and record why this hop was abandoned."""
         current = time.time() if now is None else now
         self.cooldowns[model] = current + self.cooldown_seconds
+        if reason:
+            self.hop_history.append({"model": model, "reason": reason})
+
+    def record_success(self, model: str) -> None:
+        """Record the hop that served the request — where this walk exited."""
+        self.hop_history.append({"model": model, "reason": HOP_REASON_SUCCESS})
 
     def primary_if_recovered(self, *, now: float | None = None) -> str | None:
         if self.restore_primary_after_cooldown and not self.in_cooldown(self.original, now):

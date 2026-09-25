@@ -170,6 +170,29 @@ the worker is reported `cancelled` rather than `failed`, and the payload carries
 behind the disconnect cannot deliver an answer, so re-issuing it only spends input
 tokens nobody can receive.
 
+## Hop telemetry
+
+Every dispatch reports `hop_history`: the hops that were tried, in order, each as
+`{"model": …, "reason": …}`, and the same list rides on the run row from `status`.
+The last entry is the exit point of the cascade — `success` names the hop that
+actually served the request, so a primary that answers is still visible as one
+entry rather than as silence.
+
+**Reasons.** `billing` (a drained account: HTTP 402, `insufficient balance`,
+`add credits`), `rate_limit` (429 or a quota body), `transport` (5xx, timeouts,
+connection errors), `semantic` (non-retryable failures, abort, context overflow),
+and `success`. Billing is its own bucket because it is not a transient: it says the
+account cannot serve at all, which is exactly the case the rest of the chain exists
+for.
+
+**Why it matters.** Only the terminal hop used to be visible, which is how a dead
+primary or a drained model group stayed hidden: a run that spent four hops looked
+identical to a run that answered on the first. Two numbers become readable from
+`hop_history` — the fraction of requests that exit at each hop (how much traffic
+stops before the premium route), and how much of the failure mass is networking
+versus the provider refusing (transport versus semantic). A hop is recorded with a
+reason whether it was abandoned or whether it carried the answer.
+
 ## Role names
 
 Callers can ask for a role instead of a codename — `explorer`, `researcher`,

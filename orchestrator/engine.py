@@ -7,7 +7,7 @@ import uuid
 from typing import Any
 
 from orchestrator.boundary import claim_boundary
-from orchestrator.chains import client_disconnected, status_from_message
+from orchestrator.chains import classify_failure_reason, client_disconnected, status_from_message
 from orchestrator.guards import GuardError, check_delegation
 from orchestrator.models import (
     CANCELLED,
@@ -236,6 +236,8 @@ class OmoEngine:
                 worker.result = result
                 if not self._result_failed(result):
                     worker.status = SUCCEEDED
+                    state.record_success(worker.model or "")
+                    worker.hop_history = list(state.hop_history)
                     worker.finished_at = time.time()
                     return self._outcome(run, worker)
                 error = self._result_error(result)
@@ -253,9 +255,11 @@ class OmoEngine:
                 break
             if client_disconnected(error):
                 break
+            reason = classify_failure_reason(status=status_from_message(error), message=error)
             if not state.retryable(status=status_from_message(error), message=error):
+                state.record_failure(request.model or "", reason=reason)
                 break
-            state.record_failure(request.model or "")
+            state.record_failure(request.model or "", reason=reason)
             next_model = state.next_model()
             if next_model is None:
                 break
@@ -269,6 +273,9 @@ class OmoEngine:
             worker.status = FAILED
             self._record_stage_failure(worker)
         worker.error = last_error
+        # The walk is over: keep which hops were tried and why they were dropped,
+        # whatever the terminal state (cancelled hops are history too).
+        worker.hop_history = list(state.hop_history)
         worker.finished_at = time.time()
         return self._outcome(run, worker)
 
@@ -413,6 +420,9 @@ class OmoEngine:
             "status": worker.status.lower(),
             "result": worker.result,
             "error": worker.error,
+            # Which hops were tried, in order, with the reason each was dropped:
+            # empty means the primary served it.
+            "hop_history": list(worker.hop_history),
             # Named separately from a caller-requested cancel: this one says the client
             # that wanted the answer disconnected, so no answer can be delivered.
             "client_gone": client_disconnected(worker.error),
