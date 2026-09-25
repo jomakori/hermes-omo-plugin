@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from uuid import uuid4
 
+from orchestrator import session
 from orchestrator.boundary import claim_boundary
 from orchestrator.guards import GuardError
 from orchestrator.models import (
@@ -112,7 +113,10 @@ class TaskGraph:
     # ── scheduling ────────────────────────────────────────────────────
     def run(self) -> dict[str, Any]:
         engine = self.engine
-        run = Run(run_id=f"omo_{uuid4().hex[:8]}", goal=self.goal)
+        # The graph is dispatched from the caller's turn, so the session id is
+        # resolved here rather than inside a worker thread (ContextVars would not
+        # carry it there, and the whole graph belongs to the one session anyway).
+        run = Run(run_id=f"omo_{uuid4().hex[:8]}", goal=self.goal, session_id=session.current_session_id())
         workers: dict[str, Worker] = {}
         for task in self.tasks:
             name, chain = engine._resolve_target(target=task["agent"], category=task["category"], parent_agent=None)

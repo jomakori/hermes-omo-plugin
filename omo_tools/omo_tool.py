@@ -16,7 +16,9 @@ OMO_SCHEMA: dict[str, Any] = {
         "before repeating it. Work with dependencies goes in one call: pass tasks= "
         "to dispatch a declared graph — independent tasks run in parallel, "
         "dependents wait for theirs, and dependents of a failed task come back "
-        "BLOCKED rather than being run on a broken input."
+        "BLOCKED rather than being run on a broken input. Every run is attributed to "
+        "the session that dispatched it, so status/tree answer for this session's "
+        "runs and cancel refuses another session's run unless all_sessions=true."
     ),
     "parameters": {
         "type": "object",
@@ -76,6 +78,18 @@ OMO_SCHEMA: dict[str, Any] = {
             "max_parallel": {"type": "integer", "description": "Maximum tasks in flight for a graph dispatch."},
             "max_review_cycles": {"type": "integer", "description": "Review/retry bound; 0 disables review."},
             "run_id": {"type": "string", "description": "Run to inspect, render or cancel."},
+            "all_sessions": {
+                "type": "boolean",
+                "description": (
+                    "status / tree / cancel only; default false. The runs this session dispatched "
+                    "are the only ones those actions see, and cancel refuses a run that belongs to "
+                    "another session (the error names the owning session). Set true as the escape "
+                    "hatch for cross-session inspection — an operator console or a deliberate "
+                    "takeover — to list, render or cancel every session's runs. Records written "
+                    "before session attribution (no session id) are hidden by default too, and "
+                    "appear only under this flag."
+                ),
+            },
         },
         "required": ["action"],
     },
@@ -146,20 +160,28 @@ def make_omo_handler(engine: Any) -> Callable[..., Any]:
                 )
             )
         if action == "status":
-            return render(engine.status(params.get("run_id")))
+            return render(engine.status(params.get("run_id"), all_sessions=bool(params.get("all_sessions", False))))
         if action == "tree":
             run_id = str(params.get("run_id") or "").strip()
             if not run_id:
                 return render({"error": "run_id is required for tree."})
-            payload = engine.status(run_id)
+            payload = engine.status(run_id, all_sessions=bool(params.get("all_sessions", False)))
             if "error" in payload:
+                # Includes the ownership refusal: a foreign run is not rendered.
                 return render(payload)
-            return render({"run_id": run_id, "tree": payload.get("tree"), "workers": payload.get("workers")})
+            return render(
+                {
+                    "run_id": run_id,
+                    "session_id": payload.get("session_id"),
+                    "tree": payload.get("tree"),
+                    "workers": payload.get("workers"),
+                }
+            )
         if action == "cancel":
             run_id = str(params.get("run_id") or "").strip()
             if not run_id:
                 return render({"error": "run_id is required to cancel."})
-            return render(engine.cancel(run_id))
+            return render(engine.cancel(run_id, all_sessions=bool(params.get("all_sessions", False))))
         return render({"error": f"unknown action '{action}'"})
 
     return handler

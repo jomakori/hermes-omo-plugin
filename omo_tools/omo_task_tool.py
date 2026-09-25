@@ -13,7 +13,8 @@ OMO_TASK_SCHEMA: dict[str, Any] = {
         "dependencies use the omo tool's tasks= graph instead: this runs a single "
         "task. The worker's own summary is a claim, not evidence: results carry a "
         "claim_boundary naming what the host observed and what the worker merely "
-        "asserted."
+        "asserted. The run is attributed to the calling session, exactly as an "
+        "`omo` dispatch is, so it cannot be read or cancelled from another session."
     ),
     "parameters": {
         "type": "object",
