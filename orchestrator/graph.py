@@ -130,6 +130,7 @@ class TaskGraph:
             workers[task["id"]] = worker
             run.workers.append(worker)
         engine.runs[run.run_id] = run
+        engine._persist()
 
         pending = set(workers)
         settled: dict[str, bool] = {}
@@ -144,6 +145,7 @@ class TaskGraph:
                         worker.error = "dependency failed"
                         worker.finished_at = time.time()
                         settled[task_id] = False
+                        engine._persist()
                         continue
                     # Threads do not inherit ContextVars, and the host resolves the
                     # active parent session from one (agent/subagent_lifecycle), so a
@@ -160,12 +162,14 @@ class TaskGraph:
                         worker.error = "dependency unresolved"
                         worker.finished_at = time.time()
                         settled[task_id] = False
+                    engine._persist()
                     pending.clear()
                     break
                 for future in as_completed(list(in_flight)):
                     task_id = in_flight.pop(future)
                     settled[task_id] = workers[task_id].status == SUCCEEDED
                     break  # re-evaluate readiness after each completion
+        engine._persist()
         return self._payload(run)
 
     def _run_one(self, run: Run, worker: Worker) -> None:

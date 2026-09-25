@@ -12,9 +12,11 @@ from orchestrator.guards import GuardError, check_delegation
 from orchestrator.models import (
     CANCELLED,
     FAILED,
+    INTERRUPTED,
     PENDING,
     RUNNING,
     SUCCEEDED,
+    UNFINISHED,
     Run,
     Worker,
 )
@@ -34,6 +36,14 @@ _HANDOFF_TRUNCATED = "\n[truncated: last-hop handoff — the full text ran on th
 # re-dispatch: the host's `max_turns` is a global bound on one agent's loop, not a
 # bound on how many times this engine will retry the same work.
 DEFAULT_MAX_ATTEMPTS_PER_AGENT = 3
+
+# What a restart leaves behind: the record survives, the process does not, so the
+# work must be verified on disk rather than re-dispatched blind.
+INTERRUPTED_ERROR = (
+    "gateway restarted before this worker finished; its work (and any branch or PR it produced) "
+    "is unverified — check the working tree before re-dispatching"
+)
+SHUTDOWN_ERROR = "gateway shut down mid-run; verify its work on disk before re-dispatching"
 
 _TASK_CONTEXT_OPEN = "<task_context>"
 _TASK_CONTEXT_CLOSE = "\n</task_context>"
@@ -57,12 +67,18 @@ def _brief_allowance(budget: int) -> int:
 
 
 class OmoEngine:
-    def __init__(self, ctx: Any, *, lifecycle: Any = None, request_factory: Any = None) -> None:
+    def __init__(self, ctx: Any, *, lifecycle: Any = None, request_factory: Any = None, store: Any = None) -> None:
         self._ctx = ctx
         self._lifecycle = lifecycle
         self._request_factory = request_factory
+        self._store = store
+        self._restored = False
+        self._persist_lock = threading.Lock()
         self.chains: Any = None
         self.runs: dict[str, Run] = {}
+        # Adopt the record now, so the first caller after a restart is answered from
+        # it rather than from an empty registry.
+        self._restore()
         # Failures per (agent, stage), counted engine-wide so the bound survives the
         # session-scoped FallbackState that every dispatch rebuilds from scratch.
         self._stage_failures: dict[tuple[str, str], int] = {}
@@ -73,6 +89,36 @@ class OmoEngine:
             return self._lifecycle
         self._lifecycle = self._ctx.subagent_lifecycle
         return self._lifecycle
+
+    def _restore(self) -> None:
+        """Adopt the record from disk, naming what no longer has a process behind it."""
+        if self._restored or self._store is None:
+            return
+        self._restored = True
+        adopted = {run_id: run for run_id, run in self._store.load().items() if run_id not in self.runs}
+        if not adopted:
+            return
+        for run in adopted.values():
+            for worker in run.workers:
+                if worker.status not in UNFINISHED:
+                    continue
+                worker.status = INTERRUPTED
+                worker.error = INTERRUPTED_ERROR
+                worker.finished_at = worker.finished_at or time.time()
+                run.recovered = True
+        self.runs.update(adopted)
+        # Write the downgrade back: the record must not keep claiming a process that
+        # is gone, and a second reader must not have to rediscover it.
+        with self._persist_lock:
+            self._store.save(dict(self.runs))
+
+    def _persist(self) -> None:
+        """Checkpoint the registry: a restart must find the work, not an empty list."""
+        if self._store is None:
+            return
+        self._restore()
+        with self._persist_lock:
+            self._store.save(dict(self.runs))
 
     def _resolve_target(
         self, *, target: str | None, category: str | None, parent_agent: str | None
@@ -159,6 +205,7 @@ class OmoEngine:
         worker = Worker(run_id=run_id, agent_name=name, task=goal, chain=chain, model=chain[0] if chain else None)
         run.workers.append(worker)
         self.runs[run_id] = run
+        self._persist()
 
         spec = AGENTS[name]
         # Children inherit the parent's toolsets: Hermes validates that a launch's
@@ -413,6 +460,9 @@ class OmoEngine:
         return float(self._config("worker_timeout_seconds", 1800))
 
     def _outcome(self, run: Run, worker: Worker) -> dict[str, Any]:
+        # Every terminal transition of a worker funnels through here, so this is the
+        # one checkpoint that matters: what the record says the worker got to.
+        self._persist()
         return {
             "run_id": run.run_id,
             "agent": AGENTS[worker.agent_name].display,
@@ -433,6 +483,7 @@ class OmoEngine:
     async def _run_worker(self, run: Run, worker: Worker, request: Any) -> None:
         if worker.cancel_requested:
             worker.status = CANCELLED
+            self._persist()
             return
         await asyncio.to_thread(self._run_sync, run, worker, request)
         self._ctx.emit(f"{self._key()}:worker_done", {"run_id": run.run_id, **worker.as_row()})
@@ -448,6 +499,7 @@ class OmoEngine:
             asyncio.ensure_future(coro)
 
     def status(self, run_id: str | None = None) -> dict[str, Any]:
+        self._restore()
         if run_id:
             run = self.runs.get(run_id)
             if run is None:
@@ -480,6 +532,7 @@ class OmoEngine:
                     pass
             worker.status = CANCELLED
             cancelled += 1
+        self._persist()
         return {
             "run_id": run_id,
             "cancelled": cancelled,
@@ -490,8 +543,17 @@ class OmoEngine:
     def shutdown(self) -> None:
         for run in list(self.runs.values()):
             for worker in run.workers:
-                if worker.handle is not None and worker.status in (PENDING, RUNNING):
+                if worker.status not in UNFINISHED:
+                    continue
+                # The process is going away: no further hop is paid for, and the record
+                # must say the work is unverified rather than still running.
+                worker.cancel_requested = True
+                worker.status = INTERRUPTED
+                worker.error = SHUTDOWN_ERROR
+                worker.finished_at = worker.finished_at or time.time()
+                if worker.handle is not None:
                     try:
                         self._service().cancel(worker.handle, reason="plugin unloaded")
                     except Exception:
                         pass
+        self._persist()

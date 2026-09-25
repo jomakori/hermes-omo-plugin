@@ -14,6 +14,7 @@ from orchestrator.chains import ChainResolver  # noqa: E402
 from orchestrator.engine import OmoEngine  # noqa: E402
 from orchestrator.guards import GuardError, check_delegation  # noqa: E402
 from orchestrator.personas import AGENTS_DIR  # noqa: E402
+from orchestrator.store import RunStore  # noqa: E402
 from roster import AGENTS  # noqa: E402
 
 PLUGIN_KEY = "omo"
@@ -29,6 +30,13 @@ def _settings(ctx: Any) -> dict[str, Any]:
         "categories": ctx.get_config("categories", None),
         "enabled_agents": ctx.get_config("enabled_agents", None),
     }
+
+
+def _store(ctx: Any) -> RunStore:
+    return RunStore(
+        path=ctx.get_config("state_path", None),
+        max_runs=ctx.get_config("max_persisted_runs", None),
+    )
 
 
 def _register_optional(ctx: Any, surface: str, *args: Any, **kwargs: Any) -> bool:
@@ -48,7 +56,7 @@ def _register_optional(ctx: Any, surface: str, *args: Any, **kwargs: Any) -> boo
 
 
 def register(ctx: Any) -> None:
-    engine = OmoEngine(ctx)
+    engine = OmoEngine(ctx, store=_store(ctx))
     engine.chains = ChainResolver(_settings(ctx))
 
     ctx.register_tool(
