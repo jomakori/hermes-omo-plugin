@@ -48,6 +48,8 @@ plugins:
         restore_primary_after_cooldown: true
         escalation_budget_chars: 6000   # payload the premium (last-hop) model receives
         max_attempts_per_agent: 3       # failures of one stage by one agent, engine-wide
+        state_path: ~/.omo/runs.json    # where the run registry is persisted
+        max_persisted_runs: 50   # runs kept in that record; 0 keeps everything
         max_parallel: 4          # tasks in flight for one graph dispatch
         max_review_cycles: 1     # reviewer passes per task; 0 disables review
         enabled_agents: []       # empty = the whole roster; list names to restrict it
@@ -72,7 +74,7 @@ One host setting matters for the planning pipeline: Hermes derives a child agent
 
 `omo_task` takes exactly one of `agent=` or `category=`.
 
-Dispatch blocks by default; pass `background=true` to get a `run_id` immediately and poll it with `status`. The run registry is **in-memory and scoped to the session** — `status` lists only runs dispatched in the current one, so history does not survive a session boundary.
+Dispatch blocks by default; pass `background=true` to get a `run_id` immediately and poll it with `status`. The run registry is **durable**: runs and their workers are checkpointed to `state_path` as they change, so a gateway restart answers `status` from the record rather than from an empty list. A worker whose process is gone is reported `INTERRUPTED` — the record is real, the work it was doing is not verified.
 
 Every payload that reports worker activity carries a machine-readable boundary:
 
@@ -251,6 +253,7 @@ A few decisions are worth knowing because they are not obvious:
 - **Per-agent model, not provider.** The host's launch carries `model` only and derives the provider itself. Per-agent fallback is not native either, so it is owned here — a retryable classifier plus a cooldown/restore state machine in `orchestrator/chains.py`.
 - **Personas are delivered, not assumed.** A worker's `agents/<name>.md` goes into its launch `context`, wrapped in an authoritative binding preamble, so the definition actually reaches the model rather than sitting in the repo unread. The host caps a launch's context at 32,000 chars, which every persona fits whole except `sisyphus`, which is truncated with a pointer to the full text. Every persona is also registered as a plugin skill — `skill_view("omo:<name>")` — so the complete definition is always retrievable.
 - **No per-agent permission tier.** Hermes derives a child's capabilities from its parent and refuses a launch whose toolsets are not a subset of the parent's. An earlier read-only tier could not be expressed that way, and the `pre_tool_call` guard that stood in for it never fired — it was keyed on a `session_id` the host does not send. It has been removed rather than repaired: every agent runs with the parent's capabilities, and the roster carries no permission field to mislead.
+- **The registry is on disk, not in memory.** Every run keeps a record: created, then written again at each worker's terminal state. A restart adopts that record and names what it cannot stand behind — a worker that was still running reads `INTERRUPTED`, with the work it was doing marked unverified. What it does not do is resume: the process is gone, so the caller checks the worktree, branch or PR before re-dispatching the same work.
 - **Worker approvals.** Subagent worker threads run non-interactive and refuse dangerous commands by default; ordinary work — files, tests, builds, git — is unaffected.
 - **Registration is unconditional.** `register_tool` is required and fails loudly if the host lacks it; `register_command`, `register_skill` and `on_unload` are each attempted on their own, so a host missing one still gets the others. Nothing branches on a host attribute's presence: an attribute that exists but does nothing would send the whole path down a branch that registers nothing while the plugin still reports as enabled.
 
