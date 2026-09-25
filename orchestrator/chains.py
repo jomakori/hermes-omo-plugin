@@ -19,10 +19,33 @@ _VARIANT_SUFFIXES = ("-thinking", "-max", "-high", "-medium", "-low", "-xhigh")
 
 _STATUS_IN_MESSAGE = re.compile(r"\b(?:HTTP\s*)?([45]\d{2})\b")
 
+# A client disconnect is not a provider failure: the caller that asked for the work
+# is gone, so the answer has nowhere to land and re-issuing the request can only
+# spend tokens nobody can receive. It is therefore never retryable, whatever
+# `retry_on_errors` is configured to say.
+CLIENT_DISCONNECT_STATUS = 499
+_CLIENT_DISCONNECT_PATTERN = re.compile(
+    r"client (?:closed|disconnected|gone|went away)|client_closed_request|client_disconnected|"
+    r"connection closed (?:by|before) (?:the )?client",
+    re.IGNORECASE,
+)
+
 
 def status_from_message(message: str | None) -> int | None:
     match = _STATUS_IN_MESSAGE.search(message or "")
     return int(match.group(1)) if match else None
+
+
+def client_disconnected(message: str | None) -> bool:
+    """True when the failure says the client that wanted the answer has gone away.
+
+    A 499 is the proxy's report that the caller closed the request; the CLI behind
+    it is gone and its answer can never be delivered, so the walk must not pay for
+    another hop.
+    """
+    if status_from_message(message) == CLIENT_DISCONNECT_STATUS:
+        return True
+    return bool(_CLIENT_DISCONNECT_PATTERN.search(message or ""))
 
 
 def canonical_model(model: str) -> str:

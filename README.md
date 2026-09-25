@@ -46,6 +46,8 @@ plugins:
         max_fallback_attempts: 3
         cooldown_seconds: 30
         restore_primary_after_cooldown: true
+        escalation_budget_chars: 6000   # payload the premium (last-hop) model receives
+        max_attempts_per_agent: 3       # failures of one stage by one agent, engine-wide
         max_parallel: 4          # tasks in flight for one graph dispatch
         max_review_cycles: 1     # reviewer passes per task; 0 disables review
         enabled_agents: []       # empty = the whole roster; list names to restrict it
@@ -77,7 +79,7 @@ Every payload that reports worker activity carries a machine-readable boundary:
 ```json
 "claim_boundary": {
   "boundary": "not_evidence_until_observed",
-  "observed": ["status", "model", "cancelled", "error", "result.terminal_state", "result.usage_metadata", "result.tool_execution_summary", "result.error_message"],
+  "observed": ["status", "model", "cancelled", "error", "client_gone", "result.terminal_state", "result.usage_metadata", "result.tool_execution_summary", "result.error_message"],
   "self_reported": ["result.summary", "result.structured_payload"]
 }
 ```
@@ -134,6 +136,39 @@ Only `problems` re-runs a task. The other outcomes leave it exactly as it was �
 but they are named, so "reviewed and clean" is never confused with "the review
 could not be read". The verdict is derived from the reviewer's own text, so the
 claim boundary files it as self-reported.
+
+## Bounds on the chain walk
+
+A chain walk is cheap until it is not. The last element of every chain is the
+premium, quota-bounded route, and a stage that keeps failing re-walks the whole
+chain from the primary every time it is dispatched. Three bounds apply.
+
+**The last hop carries a bounded handoff.** Advancing onto the final chain element
+sends a brief plus explicit artifacts instead of re-issuing the full launch payload
+verbatim: `escalation_budget_chars` (default `6000`, `0` disables) bounds the goal
+plus the caller's task context. The worker contract and persona are constant per
+agent rather than accumulated payload, so they travel whole — still inside the
+host's 32,000-character launch-context cap. Earlier hops are unchanged: a cheaper
+model is handed exactly the brief the primary got. What this does *not* bound: the
+host builds a child's system prompt from the launch request and adds its own
+workspace and project-context blocks, which are not fields of the launch request and
+so cannot be trimmed from here.
+
+**Attempts are bounded per agent.** `max_attempts_per_agent` (default `3`, `0`
+disables) caps how many times one agent may fail *the same stage* before the engine
+refuses another attempt. The host's `max_turns` bounds one agent's loop; it does not
+bound how many times this engine will pay for work that is looping. The count is per
+`(agent, stage)` and lives engine-wide, so it survives the fallback state that every
+dispatch rebuilds from scratch. A cancelled attempt is not a stage failure and does
+not consume the budget. The refusal is reported like any other failure, naming the
+budget.
+
+**A request whose client is gone is not re-issued.** A `499` — client closed request,
+client disconnected — is a hard stop: the walk does not advance onto the next model,
+the worker is reported `cancelled` rather than `failed`, and the payload carries
+`"client_gone": true`. This holds even when `retry_on_errors` lists `499`: the CLI
+behind the disconnect cannot deliver an answer, so re-issuing it only spends input
+tokens nobody can receive.
 
 ## Role names
 
