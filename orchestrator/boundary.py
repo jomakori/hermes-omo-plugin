@@ -22,6 +22,9 @@ OBSERVED = (
     "model",
     "cancelled",
     "error",
+    # Derived from the host-written error by a fixed classifier, never from the
+    # worker's text: it says the client that wanted the answer had gone away.
+    "client_gone",
     "result.terminal_state",
     "result.usage_metadata",
     "result.tool_execution_summary",
