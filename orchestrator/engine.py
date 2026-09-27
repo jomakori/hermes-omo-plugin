@@ -6,6 +6,7 @@ import time
 import uuid
 from typing import Any
 
+from orchestrator import session
 from orchestrator.boundary import claim_boundary
 from orchestrator.chains import classify_failure_reason, client_disconnected, status_from_message
 from orchestrator.guards import GuardError, check_delegation
@@ -201,7 +202,9 @@ class OmoEngine:
         name, chain = self._resolve_target(target=target, category=category, parent_agent=parent_agent)
         chain = tuple(self._normalize_model(model) or model for model in chain)
         run_id = f"omo_{uuid.uuid4().hex[:8]}"
-        run = Run(run_id=run_id, goal=goal)
+        # Stamp the run with the session that is paying for it, so a later read or
+        # cancel from another session can be told apart from the owner's.
+        run = Run(run_id=run_id, goal=goal, session_id=session.current_session_id())
         worker = Worker(run_id=run_id, agent_name=name, task=goal, chain=chain, model=chain[0] if chain else None)
         run.workers.append(worker)
         self.runs[run_id] = run
@@ -498,27 +501,59 @@ class OmoEngine:
         else:
             asyncio.ensure_future(coro)
 
-    def status(self, run_id: str | None = None) -> dict[str, Any]:
+    def status(self, run_id: str | None = None, all_sessions: bool = False) -> dict[str, Any]:
+        """Runs, scoped to the calling session unless `all_sessions` is set.
+
+        The registry is process-wide: every session the gateway serves reads the
+        same dict, so an unfiltered answer would hand one session another's runs.
+        A record with no session id (written before attribution, or by a host with
+        no bridge) belongs to no live session and stays out of the default view —
+        counted in `hidden_runs` rather than dropped silently — and is reachable
+        only through the opt-in.
+        """
         self._restore()
+        caller = session.current_session_id()
         if run_id:
             run = self.runs.get(run_id)
             if run is None:
                 return {"error": f"unknown run {run_id}"}
+            if not all_sessions and not session.belongs_to(run, caller):
+                return session.foreign_run(run_id, run.session_id, caller)
             return {
                 "run_id": run_id,
+                "session_id": run.session_id,
                 "tree": run.tree(),
                 "workers": [w.as_row() for w in run.workers],
                 "claim_boundary": claim_boundary(),
             }
-        return {
-            "runs": [{"run_id": r.run_id, "tree": r.tree()} for r in self.runs.values()],
+        visible = [run for run in self.runs.values() if all_sessions or session.belongs_to(run, caller)]
+        payload: dict[str, Any] = {
+            "runs": [{"run_id": r.run_id, "tree": r.tree()} for r in visible],
+            "session_id": caller,
+            "scope": "all_sessions" if all_sessions else "session",
             "claim_boundary": claim_boundary(),
         }
+        hidden = len(self.runs) - len(visible)
+        if hidden:
+            # Named, not vanished: the caller learns that other records exist (and how
+            # to reach them) without being shown another session's work.
+            payload["hidden_runs"] = hidden
+        return payload
 
-    def cancel(self, run_id: str, reason: str = "cancelled by Hermes") -> dict[str, Any]:
+    def cancel(self, run_id: str, reason: str = "cancelled by Hermes", all_sessions: bool = False) -> dict[str, Any]:
+        """Cancel a run — refusing one that belongs to a different session.
+
+        The refusal is the point of attribution: a run id that leaks across
+        sessions (read from a log, guessed, or carried over from another channel)
+        must not become a way to kill work this session did not pay for.
+        `all_sessions=True` is the deliberate override, not the default.
+        """
         run = self.runs.get(run_id)
         if run is None:
             return {"error": f"unknown run {run_id}"}
+        caller = session.current_session_id()
+        if not all_sessions and not session.belongs_to(run, caller):
+            return session.foreign_run(run_id, run.session_id, caller)
         service = self._service()
         cancelled = 0
         for worker in run.workers:

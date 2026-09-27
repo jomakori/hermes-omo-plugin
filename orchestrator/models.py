@@ -40,6 +40,14 @@ def as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def as_optional_str(value: Any) -> str | None:
+    """A durable string field: absent, blank and null all read as no value."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 @dataclass
 class Worker:
     run_id: str
@@ -139,6 +147,10 @@ class Run:
     # Set when the run was adopted from disk with work still unfinished: the
     # record is real, the process behind it is not.
     recovered: bool = False
+    # The Hermes session that dispatched this run, so one session cannot read or
+    # cancel another's work. `None` on a record written before attribution existed,
+    # or by a host with no session bridge — those belong to nobody.
+    session_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -146,6 +158,7 @@ class Run:
             "goal": self.goal,
             "created_at": self.created_at,
             "recovered": self.recovered,
+            "session_id": self.session_id,
             "workers": [worker.to_dict() for worker in self.workers],
         }
 
@@ -165,6 +178,9 @@ class Run:
             workers=workers,
             created_at=as_float(payload.get("created_at")),
             recovered=bool(payload.get("recovered")),
+            # Absent on a record written before attribution: reads as unattributed
+            # rather than as a read error, and stays hidden from a real session.
+            session_id=as_optional_str(payload.get("session_id")),
         )
 
     def tree(self) -> str:

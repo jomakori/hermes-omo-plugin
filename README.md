@@ -69,12 +69,22 @@ One host setting matters for the planning pipeline: Hermes derives a child agent
 
 | Tool | Purpose |
 |---|---|
-| `omo` | `dispatch` (one task or a whole graph) / `status` / `tree` / `cancel` |
-| `omo_task` | Delegate one subtask (`agent=`) or spawn a category worker (`category=`) |
+| `omo` | `dispatch` (one task or a whole graph) / `status` / `tree` / `cancel` — the reads and `cancel` are scoped to the calling session unless `all_sessions=true` |
+| `omo_task` | Delegate one subtask (`agent=`) or spawn a category worker (`category=`) — attributed to the calling session like any dispatch |
 
 `omo_task` takes exactly one of `agent=` or `category=`.
 
 Dispatch blocks by default; pass `background=true` to get a `run_id` immediately and poll it with `status`. The run registry is **durable**: runs and their workers are checkpointed to `state_path` as they change, so a gateway restart answers `status` from the record rather than from an empty list. A worker whose process is gone is reported `INTERRUPTED` — the record is real, the work it was doing is not verified.
+
+### A run belongs to the session that dispatched it
+
+One gateway process serves every session, so the run registry is shared — an unfiltered `status` would hand one session another's runs, and `cancel` would let it kill work it did not pay for. Each run therefore records its owner's session id, resolved through the host's own bridge (`gateway.session_context`, the accessor Hermes' tools use: the task-local session ContextVar, with `os.environ` as the fallback), and:
+
+- `status` and `tree` answer for **this session's runs only**; the payload carries `session_id` and `scope`, plus `hidden_runs` when records exist that the caller cannot see.
+- `cancel` **refuses** a run belonging to another session. The error names the owning session — `run omo_1a2b3c4d belongs to session ses_… , not the calling session (ses_…); pass all_sessions=true to reach across sessions.`
+- `all_sessions=true` is the explicit opt-in that lifts the scope for `status`, `tree` and `cancel` — the escape hatch for a deliberate cross-session inspection or takeover.
+
+Attribution degrades safely: a host with no such bridge (or one whose import fails) records no session id rather than failing the dispatch, and a record written **before** attribution existed has no owner at all — it belongs to no session, so it is hidden from a real session's default view and reachable only under `all_sessions=true`. Nothing raises.
 
 Every payload that reports worker activity carries a machine-readable boundary:
 
