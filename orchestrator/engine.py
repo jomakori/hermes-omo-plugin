@@ -45,6 +45,9 @@ INTERRUPTED_ERROR = (
     "is unverified — check the working tree before re-dispatching"
 )
 SHUTDOWN_ERROR = "gateway shut down mid-run; verify its work on disk before re-dispatching"
+# The short cause the live status row shows for an interrupted worker; the long
+# error above stays on the record for the reader who needs the detail.
+INTERRUPTED_CAUSE = "gateway restart"
 
 _TASK_CONTEXT_OPEN = "<task_context>"
 _TASK_CONTEXT_CLOSE = "\n</task_context>"
@@ -77,6 +80,9 @@ class OmoEngine:
         self._persist_lock = threading.Lock()
         self.chains: Any = None
         self.runs: dict[str, Run] = {}
+        # The live status notifier, attached by the plugin entry point. Optional:
+        # every progress emit is a no-op without it.
+        self._status: Any = None
         # Adopt the record now, so the first caller after a restart is answered from
         # it rather than from an empty registry.
         self._restore()
@@ -107,6 +113,13 @@ class OmoEngine:
                 worker.error = INTERRUPTED_ERROR
                 worker.finished_at = worker.finished_at or time.time()
                 run.recovered = True
+                # Name the interruption on the live message too, so a restart that
+                # re-attaches to the same message renders ⚠️ rather than leaving a
+                # stuck 🔁 (best-effort: a host with no listener just drops it).
+                self._progress(
+                    "worker_interrupted",
+                    {**self._worker_event(run, worker), "cause": INTERRUPTED_CAUSE},
+                )
         self.runs.update(adopted)
         # Write the downgrade back: the record must not keep claiming a process that
         # is gone, and a second reader must not have to rediscover it.
@@ -227,6 +240,9 @@ class OmoEngine:
         run = Run(run_id=run_id, goal=goal, session_id=session.current_session_id())
         worker = Worker(run_id=run_id, agent_name=name, task=goal, chain=chain, model=chain[0] if chain else None)
         run.workers.append(worker)
+        # Remember where the session's replies land before leaving the caller's
+        # turn: the worker thread that reports progress has no ContextVars.
+        session.apply_route(run, session.current_route())
         self.runs[run_id] = run
         self._persist()
 
@@ -257,6 +273,59 @@ class OmoEngine:
         except Exception:
             return default
 
+    # ── live status ───────────────────────────────────────────────────
+    def set_status_notifier(self, notifier: Any) -> None:
+        """Attach the live status notifier; every progress emit drives it."""
+        self._status = notifier
+
+    def _worker_event(self, run: Run, worker: Worker) -> dict[str, Any]:
+        """The payload every worker progress event carries."""
+        return {
+            "run_id": run.run_id,
+            "goal": run.goal,
+            "agent": worker.agent_name,
+            "task_id": worker.task_id,
+            "task": worker.task,
+            "run_ref": worker.task_id or run.run_id,
+            "status": worker.status,
+        }
+
+    def _progress(self, event: str, payload: dict[str, Any]) -> None:
+        """Announce one real transition.
+
+        The bare event goes onto the host bus (the host namespaces it), and the
+        locally attached notifier is driven directly so the live message follows
+        the same thread that changed the state — no reordering across hops.
+        Both halves are best-effort: progress must never fail the work.
+        """
+        emit = getattr(self._ctx, "emit", None)
+        if callable(emit):
+            try:
+                emit(event, dict(payload))
+            except Exception:
+                pass
+        notifier = self._status
+        if notifier is not None:
+            try:
+                notifier.handle(event, payload)
+            except Exception:
+                pass
+
+    def run_route(self, run_id: str) -> dict[str, Any] | None:
+        """Where to deliver a run's status message, or None when unknown."""
+        run = self.runs.get(run_id)
+        if run is None or not run.chat_id:
+            return None
+        return {"platform": run.platform or "", "chat_id": run.chat_id, "thread_id": run.thread_id or ""}
+
+    def note_status_message(self, run_id: str, message_id: str | None) -> None:
+        """Record the run's live status message id (or clear one that is gone)."""
+        run = self.runs.get(run_id)
+        if run is None:
+            return
+        run.status_message_id = message_id
+        self._persist()
+
     def _request(
         self, *, goal: str, context: str | None, spec: Any, model: str | None, toolsets: tuple[str, ...] | None
     ) -> Any:
@@ -285,10 +354,12 @@ class OmoEngine:
             worker.status = FAILED
             worker.error = self._attempts_exhausted_error(worker)
             worker.finished_at = time.time()
+            self._progress("worker_failed", self._worker_event(run, worker))
             return self._outcome(run, worker)
         while True:
             worker.model = request.model
             worker.status = RUNNING
+            self._progress("worker_running", self._worker_event(run, worker))
             error = ""
             try:
                 handle = service.launch(request)
@@ -300,6 +371,7 @@ class OmoEngine:
                         pass
                     worker.status = CANCELLED
                     worker.finished_at = time.time()
+                    self._progress("worker_cancelled", self._worker_event(run, worker))
                     return self._outcome(run, worker)
                 service.wait(handle, timeout_seconds=self._timeout_seconds())
                 result = service.result(handle)
@@ -309,6 +381,7 @@ class OmoEngine:
                     state.record_success(worker.model or "")
                     worker.hop_history = list(state.hop_history)
                     worker.finished_at = time.time()
+                    self._progress("worker_succeeded", self._worker_event(run, worker))
                     return self._outcome(run, worker)
                 error = self._result_error(result)
             except Exception as exc:
@@ -347,6 +420,11 @@ class OmoEngine:
         # whatever the terminal state (cancelled hops are history too).
         worker.hop_history = list(state.hop_history)
         worker.finished_at = time.time()
+        # The chain-walk terminal states (cancel/fallback-exhausted) do not pass
+        # through the early returns above, so name them here too or the live
+        # message would stay stuck on 🔁 for the most common failure path.
+        event = "worker_cancelled" if worker.status == CANCELLED else "worker_failed"
+        self._progress(event, self._worker_event(run, worker))
         return self._outcome(run, worker)
 
     def _advance_hop(self, request: Any, state: Any, next_model: str) -> Any:
@@ -506,10 +584,11 @@ class OmoEngine:
     async def _run_worker(self, run: Run, worker: Worker, request: Any) -> None:
         if worker.cancel_requested:
             worker.status = CANCELLED
+            self._progress("worker_cancelled", self._worker_event(run, worker))
             self._persist()
             return
         await asyncio.to_thread(self._run_sync, run, worker, request)
-        self._ctx.emit(f"{self._key()}:worker_done", {"run_id": run.run_id, **worker.as_row()})
+        self._progress("worker_done", self._worker_event(run, worker))
 
     async def _run_graph(self, graph: Any, run: Run) -> None:
         # The schedule is a long, blocking walk of a thread pool: keep it off the
@@ -612,6 +691,10 @@ class OmoEngine:
                 worker.status = INTERRUPTED
                 worker.error = SHUTDOWN_ERROR
                 worker.finished_at = worker.finished_at or time.time()
+                self._progress(
+                    "worker_interrupted",
+                    {**self._worker_event(run, worker), "cause": INTERRUPTED_CAUSE},
+                )
                 if worker.handle is not None:
                     try:
                         self._service().cancel(worker.handle, reason="plugin unloaded")

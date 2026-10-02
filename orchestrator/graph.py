@@ -143,8 +143,19 @@ class TaskGraph:
                 parent_id=task["parent_id"],
             )
             run.workers.append(worker)
+        # Where the session's replies land, captured before the worker threads run.
+        session.apply_route(run, session.current_route())
         engine.runs[run.run_id] = run
         engine._persist()
+        engine._progress(
+            "run_created",
+            {
+                "run_id": run.run_id,
+                "goal": run.goal,
+                "review": bool(self.review),
+                "workers": [{"agent": w.agent_name, "task_id": w.task_id, "task": w.task} for w in run.workers],
+            },
+        )
         return run
 
     def execute(self, run: Run) -> None:
@@ -166,6 +177,12 @@ class TaskGraph:
                         worker.finished_at = time.time()
                         settled[task_id] = False
                         engine._persist()
+                        # Name the dependency the block is waiting on: "waiting on
+                        # prometheus" is the reader's signal, "dependency failed"
+                        # is only the record's.
+                        waiting = [dep for dep in worker.depends_on if settled.get(dep) is False]
+                        cause = f"waiting on {', '.join(waiting)}" if waiting else "dependency failed"
+                        engine._progress("task_blocked", {**self._task_event(run, worker), "cause": cause})
                         continue
                     # Threads do not inherit ContextVars, and the host resolves the
                     # active parent session from one (agent/subagent_lifecycle), so a
@@ -173,6 +190,7 @@ class TaskGraph:
                     # parent session is available." Run each task inside a copy of the
                     # caller's context.
                     in_flight[pool.submit(contextvars.copy_context().run, self._run_one, run, worker)] = task_id
+                    engine._progress("task_started", self._task_event(run, worker))
                 if not in_flight:
                     # Nothing runnable and nothing running: the remainder is blocked
                     # behind a failure (cycles are rejected in _validate).
@@ -182,14 +200,36 @@ class TaskGraph:
                         worker.error = "dependency unresolved"
                         worker.finished_at = time.time()
                         settled[task_id] = False
+                        engine._progress(
+                            "task_blocked",
+                            {**self._task_event(run, worker), "cause": "dependency unresolved"},
+                        )
                     engine._persist()
                     pending.clear()
                     break
                 for future in as_completed(list(in_flight)):
                     task_id = in_flight.pop(future)
                     settled[task_id] = workers[task_id].status == SUCCEEDED
+                    engine._progress("task_settled", self._task_event(run, workers[task_id]))
                     break  # re-evaluate readiness after each completion
         engine._persist()
+        engine._progress(
+            "run_finished",
+            {"run_id": run.run_id, "goal": run.goal, "status": self._payload(run).get("status")},
+        )
+
+    @staticmethod
+    def _task_event(run: Run, worker: Worker) -> dict[str, Any]:
+        """The payload every task progress event carries."""
+        return {
+            "run_id": run.run_id,
+            "goal": run.goal,
+            "agent": worker.agent_name,
+            "task_id": worker.task_id,
+            "task": worker.task,
+            "run_ref": worker.task_id or run.run_id,
+            "status": worker.status,
+        }
 
     def _run_one(self, run: Run, worker: Worker) -> None:
         engine = self.engine
@@ -205,6 +245,15 @@ class TaskGraph:
         for cycle in range(1, self.max_review_cycles + 1):
             verdict, problems = self._review_once(run, worker)
             worker.review_verdict = verdict
+            engine._progress(
+                "review_verdict",
+                {
+                    **self._task_event(run, worker),
+                    "verdict": verdict,
+                    "reviewer": REVIEW_AGENT,
+                    "cycle": cycle,
+                },
+            )
             if verdict != "problems" or not problems:
                 return
             worker.review_cycles = cycle
@@ -238,6 +287,10 @@ class TaskGraph:
         request = engine._request(goal=reviewer.task, context=material, spec=spec, model=reviewer.model, toolsets=None)
         engine._run_sync(run, reviewer, request)
         if reviewer.status != SUCCEEDED:
+            engine._progress(
+                "reviewer_failed",
+                {**self._task_event(run, reviewer), "error": reviewer.error, "reviewer": REVIEW_AGENT},
+            )
             return "reviewer_failed", ""
         return self._verdict(reviewer)
 

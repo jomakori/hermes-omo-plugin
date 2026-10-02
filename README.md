@@ -52,6 +52,9 @@ plugins:
         max_persisted_runs: 50   # runs kept in that record; 0 keeps everything
         max_parallel: 4          # tasks in flight for one graph dispatch
         max_review_cycles: 1     # reviewer passes per task; 0 disables review
+        status_message_enabled: true     # one live Discord message per run, edited in place
+        status_edit_interval: 2.0        # seconds between edits (throttle floor)
+        status_phrase_interval: 3.0      # seconds between rotating phrase lines
         enabled_agents: []       # empty = the whole roster; list names to restrict it
         roles:                   # caller-facing role names -> roster entries
           implementer: hephaestus
@@ -102,6 +105,99 @@ something the host can see (the working tree, the tests, git) before it is repea
 user. A worker that says it refactored a module has not thereby refactored it. Validation
 errors (`{"error": "goal is required to dispatch."}`) carry no boundary, because no worker
 ran.
+
+## Live status message
+
+Every run posts **one** message to the conversation that dispatched it and then
+**edits that same message in place** as the run moves — one message per `run_id`,
+never a second. A graph run with four workers still owns a single message; each
+worker is a header block inside it. So `status_message_enabled: false` turns the
+whole surface off.
+
+```
+🏗️ omo: hephaestus: OKT-161 — shell parity
+- dispatch ✅
+- run 🔁 omo_304bf8e5 · t4 — wiring the nav badge semantics
+  ↳ cycling: patching components/shell.rs… (3s)
+- review ⏳
+
+🏗️ omo: metis: analysis stage — openagent chart
+- dispatch ✅
+- run ⛔ waiting on prometheus
+- review ⏳
+
+🏗️ omo: oracle: architecture
+- dispatch ✅
+- run ⚠️ gateway restart
+- review ✅ momus · problems (cycle 1)
+```
+
+**Shape.** One header block per agent/worker, separated by a blank line. The
+header is exactly `🏗️ omo: <agent>: <process>`, where `<process>` is the worker's
+task (or the run's goal) truncated to 60 characters. Each block lists three
+phases in order — `dispatch`, `run`, `review` — one `- <phase> <emoji>` row each:
+
+| Emoji | Meaning |
+|---|---|
+| 🔁 | running — the row also carries `run_id · task_id — detail` |
+| ⏳ | pending |
+| ✅ | done — a finished run row carries its duration (`22m`) |
+| 🔍 | reviewing — `reviewer · run_id · task_id:review` |
+| ⛔ | blocked on a dependency — the cause is named (`waiting on prometheus`) |
+| ⚠️ | interrupted — the cause is named (`gateway restart`) |
+| ❌ | failed |
+| ⏸ | cancelled |
+
+The 🔁 `run` row is the only one with a line under it — the rotating
+`  ↳ cycling: <phrase> (3s)` line, re-rendered every ~3s so the message visibly
+lives. Review rows are **folded into the producing worker's block** — the reviewer
+and verdict are named on the row (`review ✅ momus · problems (cycle 1)`,
+`review 🔍 momus · <run> · <task>:review`), never a block of their own. A message
+is capped at Discord's 2000 characters: long block lists collapse with `…N more`,
+and only if even the headers overflow are trailing blocks folded into `…N more
+agents`.
+
+**Delivery.** The message is posted on the run's first transition and PATCHed on
+every later one. The message id is persisted on the run record
+(`state_path`), so a gateway restart keeps editing the same message; a fresh one
+is posted only when the stored id is gone (deleted, or unknown to the edit).
+
+**Keeping it alive.** The renderer is pure (`orchestrator/status_message.py`,
+run state → exact string) and the throttle/dedupe rules are a pure state machine
+(`orchestrator/status_tracker.py`, no Discord, no clock — both injected):
+
+- the first render posts; every later one edits the same id;
+- an edit whose text is unchanged is skipped entirely (no-op dedupe);
+- otherwise edits are throttled to at least `status_edit_interval` (default 2s);
+- a throttled change is remembered and flushed on the next tick, so a fast burst
+  of transitions never loses the last state;
+- the in-progress `run` phrase rotates every `status_phrase_interval`
+  (default 3s) so the message stays visibly alive;
+- a terminal state **always** forces a final edit, ignoring the throttle.
+
+Delivery is best-effort by contract: a status message is a courtesy, so a failed
+post or edit never fails the run it describes. The adapter's HTTP session is bound
+to the gateway's event loop, so delivery is **scheduled onto that loop** from the
+status worker thread (`asyncio.run_coroutine_threadsafe`) rather than run on a
+fresh loop — the same cross-thread hop the host's own dispatch uses. There is **no
+plugin-facing "send" verb** (`ctx.platform_actions` exposes only `add_reaction` and
+`set_thread_title`), so the transport resolves the adapter through the runner's own
+profile-aware, fail-closed `_authorization_adapter` lookup — a documented deviation
+from the consent-gated facade, since no capability for this verb exists to grant.
+See `orchestrator/gateway_status.py`.
+
+**Events.** Transitions are announced as **bare** event names (the host
+namespaces them as `omo:<name>`, so a pre-prefixed name is rejected):
+
+| Event | Emitted at |
+|---|---|
+| `worker_running` / `worker_succeeded` / `worker_failed` / `worker_cancelled` / `worker_done` | `engine.py` — a worker's status change (`_run_sync`, and the background wrapper) |
+| `worker_interrupted` | `engine.py` — a worker recovered as interrupted after a restart, or on shutdown |
+| `run_created` | `graph.py` — the run record is written |
+| `task_started` / `task_blocked` | `graph.py` — a task is submitted, or blocked on a failed dependency |
+| `task_settled` | `graph.py` — a task's future completes |
+| `review_verdict` / `reviewer_failed` | `graph.py` — a review returns a verdict, or the reviewer itself fails |
+| `run_finished` | `graph.py` — the final payload is built |
 
 ## Task graphs
 

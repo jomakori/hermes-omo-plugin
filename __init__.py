@@ -14,6 +14,8 @@ from orchestrator.chains import ChainResolver  # noqa: E402
 from orchestrator.engine import OmoEngine  # noqa: E402
 from orchestrator.guards import GuardError, check_delegation  # noqa: E402
 from orchestrator.personas import AGENTS_DIR  # noqa: E402
+from orchestrator.status_notifier import StatusNotifier  # noqa: E402
+from orchestrator.status_tracker import DEFAULT_MIN_EDIT_INTERVAL, DEFAULT_PHRASE_INTERVAL, StatusTracker  # noqa: E402
 from orchestrator.store import RunStore  # noqa: E402
 from roster import AGENTS  # noqa: E402
 
@@ -39,6 +41,42 @@ def _store(ctx: Any) -> RunStore:
     )
 
 
+def _status_notifier(ctx: Any, engine: OmoEngine) -> StatusNotifier | None:
+    """Build the live status notifier, or None when switched off.
+
+    The tracker is pure (see ``orchestrator.status_tracker``), so the throttle and
+    dedupe rules are unit-tested without a gateway; only the transport needs one.
+    """
+    if not _config_flag(ctx, "status_message_enabled", True):
+        return None
+    tracker = StatusTracker(
+        min_edit_interval=_config_number(ctx, "status_edit_interval", DEFAULT_MIN_EDIT_INTERVAL),
+        phrase_interval=_config_number(ctx, "status_phrase_interval", DEFAULT_PHRASE_INTERVAL),
+    )
+    notifier = StatusNotifier(ctx, engine=engine, tracker=tracker)
+    # A restart keeps editing the message the run already has, rather than posting
+    # a second one: adopt every persisted id before the first event arrives.
+    for run_id, run in getattr(engine, "runs", {}).items():
+        message_id = getattr(run, "status_message_id", None)
+        if message_id:
+            notifier.adopt(run_id, message_id)
+    return notifier
+
+
+def _config_flag(ctx: Any, key: str, default: bool) -> bool:
+    try:
+        return bool(ctx.get_config(key, default))
+    except Exception:
+        return default
+
+
+def _config_number(ctx: Any, key: str, default: float) -> float:
+    try:
+        return float(ctx.get_config(key, default))
+    except Exception:
+        return default
+
+
 def _register_optional(ctx: Any, surface: str, *args: Any, **kwargs: Any) -> bool:
     """Attempt one optional surface, independently of every other.
 
@@ -58,6 +96,13 @@ def _register_optional(ctx: Any, surface: str, *args: Any, **kwargs: Any) -> boo
 def register(ctx: Any) -> None:
     engine = OmoEngine(ctx, store=_store(ctx))
     engine.chains = ChainResolver(_settings(ctx))
+
+    # The live status message: one Discord message per run, edited in place as the
+    # run moves. Built before the tools so the very first transition is captured.
+    notifier = _status_notifier(ctx, engine)
+    if notifier is not None:
+        engine.set_status_notifier(notifier)
+        notifier.start()
 
     ctx.register_tool(
         name="omo",
@@ -91,7 +136,18 @@ def register(ctx: Any) -> None:
         persona = AGENTS_DIR / f"{name}.md"
         if persona.is_file():
             _register_optional(ctx, "register_skill", name, persona, description=f"Full OMO persona for {name}")
-    _register_optional(ctx, "on_unload", engine.shutdown)
+    _register_optional(ctx, "on_unload", _make_teardown(engine, notifier))
+
+
+def _make_teardown(engine: OmoEngine, notifier: StatusNotifier | None) -> Any:
+    """One unload callback: stop the status worker, then settle the runs."""
+
+    def _teardown() -> None:
+        if notifier is not None:
+            notifier.stop()
+        engine.shutdown()
+
+    return _teardown
 
 
 __all__ = ["register", "PLUGIN_KEY", "GuardError", "check_delegation"]

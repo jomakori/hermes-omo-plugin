@@ -17,6 +17,9 @@ from __future__ import annotations
 from typing import Any
 
 SESSION_ID_ENV = "HERMES_SESSION_ID"
+ROUTE_PLATFORM_ENV = "HERMES_SESSION_PLATFORM"
+ROUTE_CHAT_ENV = "HERMES_SESSION_CHAT_ID"
+ROUTE_THREAD_ENV = "HERMES_SESSION_THREAD_ID"
 
 
 def current_session_id() -> str | None:
@@ -33,6 +36,36 @@ def current_session_id() -> str | None:
         return None
     session_id = str(value).strip()
     return session_id or None
+
+
+def current_route() -> dict[str, str] | None:
+    """Where the calling session's replies land, or `None` when unknown.
+
+    The live status message is delivered back into the conversation that paid for
+    the run, which means the run has to remember the platform/chat it came from —
+    a worker thread has no session ContextVars. The bridge is the same optional
+    one ``current_session_id`` uses, so a host without it just gets no route and
+    no status message rather than a failed dispatch.
+    """
+    try:
+        from gateway.session_context import get_session_env  # noqa: PLC0415
+
+        platform = str(get_session_env(ROUTE_PLATFORM_ENV, "") or "").strip()
+        chat_id = str(get_session_env(ROUTE_CHAT_ENV, "") or "").strip()
+        thread_id = str(get_session_env(ROUTE_THREAD_ENV, "") or "").strip()
+    except Exception:
+        return None
+    if not chat_id:
+        return None
+    return {"platform": platform, "chat_id": chat_id, "thread_id": thread_id}
+
+
+def apply_route(run: Any, route: dict[str, str] | None) -> None:
+    """Copy a resolved route onto a run record; a missing route stays blank."""
+    route = route or {}
+    run.platform = str(route.get("platform") or "").strip() or None
+    run.chat_id = str(route.get("chat_id") or "").strip() or None
+    run.thread_id = str(route.get("thread_id") or "").strip() or None
 
 
 def belongs_to(run: Any, caller: str | None) -> bool:
@@ -60,4 +93,14 @@ def foreign_run(run_id: str, owner: str | None, caller: str | None) -> dict[str,
     }
 
 
-__all__ = ["SESSION_ID_ENV", "belongs_to", "current_session_id", "foreign_run"]
+__all__ = [
+    "ROUTE_CHAT_ENV",
+    "ROUTE_PLATFORM_ENV",
+    "ROUTE_THREAD_ENV",
+    "SESSION_ID_ENV",
+    "apply_route",
+    "belongs_to",
+    "current_route",
+    "current_session_id",
+    "foreign_run",
+]

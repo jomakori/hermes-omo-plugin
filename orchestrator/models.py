@@ -151,6 +151,14 @@ class Run:
     # cancel another's work. `None` on a record written before attribution existed,
     # or by a host with no session bridge — those belong to nobody.
     session_id: str | None = None
+    # Where the run's live status message lands. Captured at dispatch because a
+    # worker thread has no session ContextVars to resolve the route from.
+    platform: str | None = None
+    chat_id: str | None = None
+    thread_id: str | None = None
+    # The one message the run edits in place. Persisted so a gateway restart keeps
+    # editing the same message instead of posting a second one.
+    status_message_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -159,6 +167,10 @@ class Run:
             "created_at": self.created_at,
             "recovered": self.recovered,
             "session_id": self.session_id,
+            "platform": self.platform,
+            "chat_id": self.chat_id,
+            "thread_id": self.thread_id,
+            "status_message_id": self.status_message_id,
             "workers": [worker.to_dict() for worker in self.workers],
         }
 
@@ -181,6 +193,10 @@ class Run:
             # Absent on a record written before attribution: reads as unattributed
             # rather than as a read error, and stays hidden from a real session.
             session_id=as_optional_str(payload.get("session_id")),
+            platform=as_optional_str(payload.get("platform")),
+            chat_id=as_optional_str(payload.get("chat_id")),
+            thread_id=as_optional_str(payload.get("thread_id")),
+            status_message_id=as_optional_str(payload.get("status_message_id")),
         )
 
     def tree(self) -> str:
