@@ -94,6 +94,15 @@ class GatewayStatusTransport:
         return bool(self.chat_id)
 
     @property
+    def _target(self) -> str:
+        """The channel that holds the message: the thread when the route has one.
+
+        ``edit_message`` resolves the channel from this argument (discord
+        adapter.py:3008), so the edit must name the same channel the post used.
+        """
+        return self.thread_id or self.chat_id
+
+    @property
     def loop(self) -> Any | None:
         """The gateway's event loop, or None when no live gateway owns this delivery.
 
@@ -148,7 +157,7 @@ class GatewayStatusTransport:
         adapter = self._adapter()
         if adapter is None:
             return None
-        target = self.thread_id or self.chat_id
+        target = self._target
         try:
             result = await adapter.send(target, text, metadata=self._metadata())
         except Exception as exc:
@@ -167,7 +176,7 @@ class GatewayStatusTransport:
             self.last_gone = False
             return False
         try:
-            result = await adapter.edit_message(self.chat_id, message_id, text, metadata=self._metadata())
+            result = await adapter.edit_message(self._target, message_id, text, metadata=self._metadata())
         except Exception as exc:
             logger.debug("OMO status edit failed for %s: %s", run_key, exc)
             self.last_gone = False

@@ -132,6 +132,16 @@ def test_thread_route_posts_to_the_thread_and_forwards_metadata():
     assert adapter.sent[0]["metadata"] == {"thread_id": "t7"}
 
 
+def test_thread_route_edits_the_message_in_the_thread_it_posted_to():
+    """The edit must name the channel holding the message, not the parent chat."""
+    adapter = StubAdapter()
+    transport, _ = _transport(adapter, thread_id="t7")
+
+    asyncio.run(transport.post("omo_1", "x"))
+    assert asyncio.run(transport.edit("omo_1", "msg-1", "updated")) is True
+    assert adapter.edited[0]["chat_id"] == "t7"
+
+
 def test_missing_adapter_is_a_silent_no_op():
     transport, _ = _transport(None, runner=PlainRunner(adapter=None))
 
