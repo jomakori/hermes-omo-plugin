@@ -176,18 +176,38 @@ class OmoEngine:
         review: bool = False,
         max_parallel: int | None = None,
         max_review_cycles: int | None = None,
+        background: bool = False,
     ) -> dict[str, Any]:
-        """Run a declared dependency graph: parallel where independent, ordered where not."""
+        """Run a declared dependency graph: parallel where independent, ordered where not.
+
+        ``background`` mirrors a plain dispatch: the graph is declared, a ``run_id``
+        is returned, and the schedule runs after the tool call has already answered.
+        Without it the call blocks until the last task settles — which is what held a
+        long graph open for the host's whole tool budget.
+        """
         from orchestrator.graph import TaskGraph
 
-        return TaskGraph(
+        graph = TaskGraph(
             self,
             tasks,
             goal=goal,
             review=review,
             max_parallel=max_parallel,
             max_review_cycles=max_review_cycles,
-        ).run()
+        )
+        # Declared before the branch, so a rejected graph is still a caller error
+        # (`GuardError` from TaskGraph's validation) rather than a silent run_id.
+        run = graph.build()
+        if background:
+            self._spawn(self._run_graph(graph, run))
+            return {
+                "run_id": run.run_id,
+                "status": "running",
+                "tree": run.tree(),
+                "claim_boundary": claim_boundary(),
+            }
+        graph.execute(run)
+        return graph._payload(run)
 
     def dispatch(
         self,
@@ -490,6 +510,12 @@ class OmoEngine:
             return
         await asyncio.to_thread(self._run_sync, run, worker, request)
         self._ctx.emit(f"{self._key()}:worker_done", {"run_id": run.run_id, **worker.as_row()})
+
+    async def _run_graph(self, graph: Any, run: Run) -> None:
+        # The schedule is a long, blocking walk of a thread pool: keep it off the
+        # host's loop, exactly like a single background worker.
+        await asyncio.to_thread(graph.execute, run)
+        self._ctx.emit(f"{self._key()}:graph_done", {"run_id": run.run_id, **graph._payload(run)})
 
     def _key(self) -> str:
         return "omo"

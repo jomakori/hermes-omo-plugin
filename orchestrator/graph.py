@@ -112,12 +112,23 @@ class TaskGraph:
 
     # ── scheduling ────────────────────────────────────────────────────
     def run(self) -> dict[str, Any]:
+        """Build the run, execute it to completion, and report what happened."""
+        run = self.build()
+        self.execute(run)
+        return self._payload(run)
+
+    def build(self) -> Run:
+        """Declare the run and its workers without launching any of them.
+
+        Split out of ``run()`` so a background dispatch can hand the caller a
+        ``run_id`` before the first launch: the record is what the caller polls,
+        and it has to exist while the work is still pending.
+        """
         engine = self.engine
         # The graph is dispatched from the caller's turn, so the session id is
         # resolved here rather than inside a worker thread (ContextVars would not
         # carry it there, and the whole graph belongs to the one session anyway).
         run = Run(run_id=f"omo_{uuid4().hex[:8]}", goal=self.goal, session_id=session.current_session_id())
-        workers: dict[str, Worker] = {}
         for task in self.tasks:
             name, chain = engine._resolve_target(target=task["agent"], category=task["category"], parent_agent=None)
             chain = tuple(engine._normalize_model(model) or model for model in chain)
@@ -131,10 +142,15 @@ class TaskGraph:
                 depends_on=tuple(task["depends_on"]),
                 parent_id=task["parent_id"],
             )
-            workers[task["id"]] = worker
             run.workers.append(worker)
         engine.runs[run.run_id] = run
         engine._persist()
+        return run
+
+    def execute(self, run: Run) -> None:
+        """Drive ``run``'s schedule to completion, in this thread."""
+        engine = self.engine
+        workers: dict[str, Worker] = {worker.task_id: worker for worker in run.workers}
 
         pending = set(workers)
         settled: dict[str, bool] = {}
@@ -174,7 +190,6 @@ class TaskGraph:
                     settled[task_id] = workers[task_id].status == SUCCEEDED
                     break  # re-evaluate readiness after each completion
         engine._persist()
-        return self._payload(run)
 
     def _run_one(self, run: Run, worker: Worker) -> None:
         engine = self.engine
