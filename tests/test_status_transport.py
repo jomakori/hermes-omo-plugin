@@ -108,9 +108,7 @@ def test_post_uses_the_adapter_send_signature():
     transport, _ = _transport(adapter)
 
     assert asyncio.run(transport.post("omo_1", "hello")) == "msg-1"
-    assert adapter.sent == [
-        {"chat_id": "42", "content": "hello", "reply_to": None, "metadata": None}
-    ]
+    assert adapter.sent == [{"chat_id": "42", "content": "hello", "reply_to": None, "metadata": None}]
 
 
 def test_edit_uses_the_adapter_edit_message_signature():
@@ -118,9 +116,7 @@ def test_edit_uses_the_adapter_edit_message_signature():
     transport, _ = _transport(adapter)
 
     assert asyncio.run(transport.edit("omo_1", "msg-1", "updated")) is True
-    assert adapter.edited == [
-        {"chat_id": "42", "message_id": "msg-1", "content": "updated", "metadata": None}
-    ]
+    assert adapter.edited == [{"chat_id": "42", "message_id": "msg-1", "content": "updated", "metadata": None}]
 
 
 def test_thread_route_posts_to_the_thread_and_forwards_metadata():

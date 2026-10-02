@@ -382,4 +382,3 @@ def test_declared_graph_review_row_folds_into_the_producer_block():
     # the reviewer ran: 🔍 named it mid-flight, then the verdict settled the row
     assert any("- review 🔍 momus · " in text for text in texts)
     assert any("- review ✅ momus · pass" in text for text in texts)
-

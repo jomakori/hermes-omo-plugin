@@ -117,19 +117,13 @@ def test_mixed_multi_agent_run_golden():
 
 def test_dependency_blocked_worker_golden():
     assert render_block(blocked_block()) == (
-        "🏗️ omo: metis: analysis stage — openagent chart\n"
-        "- dispatch ✅\n"
-        "- run ⛔ waiting on prometheus\n"
-        "- review ⏳"
+        "🏗️ omo: metis: analysis stage — openagent chart\n- dispatch ✅\n- run ⛔ waiting on prometheus\n- review ⏳"
     )
 
 
 def test_interrupted_worker_with_cause_golden():
     assert render_block(interrupted_block()) == (
-        "🏗️ omo: oracle: architecture\n"
-        "- dispatch ✅\n"
-        "- run ⚠️ gateway restart\n"
-        "- review ✅ momus · problems (cycle 1)"
+        "🏗️ omo: oracle: architecture\n- dispatch ✅\n- run ⚠️ gateway restart\n- review ✅ momus · problems (cycle 1)"
     )
 
 
@@ -183,9 +177,7 @@ def test_every_legend_emoji_renders_on_a_run_row():
         "cancelled": "- run ⏸",
     }
     for status, expected in caserows.items():
-        text = render_block(
-            {"agent": "a", "process": "p", "phases": [_phase("run", status, cause="why")]}
-        )
+        text = render_block({"agent": "a", "process": "p", "phases": [_phase("run", status, cause="why")]})
         assert expected in text, status
 
 
