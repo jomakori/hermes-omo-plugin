@@ -74,7 +74,7 @@ One host setting matters for the planning pipeline: Hermes derives a child agent
 
 `omo_task` takes exactly one of `agent=` or `category=`.
 
-Dispatch blocks by default; pass `background=true` to get a `run_id` immediately and poll it with `status`. The run registry is **durable**: runs and their workers are checkpointed to `state_path` as they change, so a gateway restart answers `status` from the record rather than from an empty list. A worker whose process is gone is reported `INTERRUPTED` — the record is real, the work it was doing is not verified.
+Dispatch blocks by default; pass `background=true` to get a `run_id` immediately and poll it with `status`. The flag applies to a `tasks=` graph as well as to a single task: the graph is declared, its `run_id` returned, and the schedule runs off the tool call instead of holding it open until the last task settles. The run registry is **durable**: runs and their workers are checkpointed to `state_path` as they change, so a gateway restart answers `status` from the record rather than from an empty list. A worker whose process is gone is reported `INTERRUPTED` — the record is real, the work it was doing is not verified.
 
 ### A run belongs to the session that dispatched it
 

@@ -484,3 +484,109 @@ def test_tool_renders_a_rejected_graph_instead_of_raising():
     )
     assert payload["rejected"] is True
     assert "itself" in payload["error"]
+
+
+# ── background dispatches must not hold the host tool call open ───────
+def test_background_graph_returns_a_run_id_before_launching_anything():
+    """Regression: a tasks= dispatch ignored background= and blocked on the whole
+    schedule, so a long graph ran out the host's tool budget instead of answering."""
+    lifecycle = ScriptedLifecycle(delay=0.05)
+    engine = make_engine(lifecycle)
+    payload = json.loads(
+        asyncio.run(
+            make_omo_handler(engine)(
+                {
+                    "action": "dispatch",
+                    "goal": "ship it",
+                    "background": True,
+                    "tasks": [
+                        {"id": "a", "agent": "explore", "prompt": "task a"},
+                        {"id": "b", "agent": "tester", "prompt": "task b", "depends_on": ["a"]},
+                    ],
+                }
+            )
+        )
+    )
+
+    assert payload["status"] == "running"
+    assert payload["run_id"].startswith("omo_")
+    assert lifecycle.launches == [], "the tool call must return before the first launch"
+    # The schedule is the host's to drive now; drop the coroutine the fake host kept.
+    engine._ctx.spawned[0].close()
+
+
+def test_background_graph_runs_on_the_hosts_spawned_task():
+    """The returned run_id is pollable, and the spawned schedule actually finishes it."""
+    lifecycle = ScriptedLifecycle()
+    engine = make_engine(lifecycle)
+    payload = json.loads(
+        asyncio.run(
+            make_omo_handler(engine)(
+                {
+                    "action": "dispatch",
+                    "goal": "ship it",
+                    "background": True,
+                    "tasks": [{"id": "a", "agent": "explore", "prompt": "task a"}],
+                }
+            )
+        )
+    )
+
+    spawned = engine._ctx.spawned
+    assert len(spawned) == 1, "one schedule task, as a single background dispatch spawns one worker"
+    asyncio.run(spawned[0])
+
+    assert lifecycle.goals() == ["task a"]
+    status = engine.status(payload["run_id"])
+    assert [(row["task_id"], row["status"]) for row in status["workers"]] == [("a", SUCCEEDED)]
+
+
+def test_background_review_path_also_returns_immediately():
+    """A single task with review controls routes through the graph; background must carry."""
+    lifecycle = ScriptedLifecycle(
+        results=[
+            FakeResult("first"),
+            FakeResult(structured_payload={"verdict": "problems", "problems": ["no test"]}),
+            FakeResult("second"),
+        ]
+    )
+    engine = make_engine(lifecycle)
+    payload = json.loads(
+        asyncio.run(
+            make_omo_handler(engine)(
+                {
+                    "action": "dispatch",
+                    "goal": "single task",
+                    "agent": "tester",
+                    "review": True,
+                    "max_review_cycles": 1,
+                    "background": True,
+                }
+            )
+        )
+    )
+
+    assert payload["status"] == "running"
+    assert lifecycle.launches == []
+    asyncio.run(engine._ctx.spawned[0])
+    assert len(lifecycle.launches) == 3, "implement, review, re-implement"
+
+
+def test_background_graph_still_rejects_a_bad_declaration():
+    """A run_id is only handed out once the declaration has been validated."""
+    engine = make_engine(ScriptedLifecycle())
+    payload = json.loads(
+        asyncio.run(
+            make_omo_handler(engine)(
+                {
+                    "action": "dispatch",
+                    "background": True,
+                    "tasks": [{"id": "a", "agent": "explore", "prompt": "x", "depends_on": ["ghost"]}],
+                }
+            )
+        )
+    )
+
+    assert payload["rejected"] is True
+    assert "unknown task" in payload["error"]
+    assert engine._ctx.spawned == [], "a rejected graph must not leave a schedule running"

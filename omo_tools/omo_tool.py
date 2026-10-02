@@ -67,7 +67,14 @@ OMO_SCHEMA: dict[str, Any] = {
                 ),
             },
             "context": {"type": "string", "description": "Project conventions, memory, constraints."},
-            "background": {"type": "boolean", "description": "Return immediately; result delivered later."},
+            "background": {
+                "type": "boolean",
+                "description": (
+                    "Return immediately with a run_id to poll with status. Applies to a single "
+                    "dispatch and to a tasks= graph alike; without it the call blocks until the "
+                    "work finishes."
+                ),
+            },
             "review": {
                 "type": "boolean",
                 "description": (
@@ -115,6 +122,7 @@ def make_omo_handler(engine: Any) -> Callable[..., Any]:
                             review=bool(params.get("review", False)),
                             max_parallel=params.get("max_parallel"),
                             max_review_cycles=params.get("max_review_cycles"),
+                            background=bool(params.get("background", False)),
                         )
                     )
                 except GuardError as exc:
@@ -146,6 +154,7 @@ def make_omo_handler(engine: Any) -> Callable[..., Any]:
                             review=bool(params.get("review", False)),
                             max_parallel=params.get("max_parallel"),
                             max_review_cycles=params.get("max_review_cycles"),
+                            background=bool(params.get("background", False)),
                         )
                     )
                 except GuardError as exc:
