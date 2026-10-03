@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from orchestrator.status_tracker import (
     DEFAULT_MIN_EDIT_INTERVAL,
+    DEFAULT_MOVE_INTERVAL,
     DEFAULT_PHRASE_INTERVAL,
     StatusTracker,
 )
@@ -148,7 +149,10 @@ def test_graph_run_has_one_block_per_worker():
         ),
     )
     assert action.kind == "post"
-    assert action.text.count("🏗️ omo:") == 2
+    # One run heading, one condensed label per worker — never a second heading.
+    assert action.text.count("🏗️ omo") == 1
+    assert "write the code · hephaestus · Deep Agent" in action.text
+    assert "review it · momus · Plan Critic" in action.text
     assert "\n\n" in action.text
     assert "- dispatch ⏳" in action.text  # not started yet
 
@@ -163,7 +167,7 @@ def test_reviewer_events_fold_into_the_producer_block():
         {"run_id": "omo_g", "agent": "momus", "task_id": "t1:review", "task": "review t1"},
     )
     # no separate momus block: the review row is folded into the producer's block
-    assert action.text.count("🏗️ omo:") == 1
+    assert action.text.count("🏗️ omo") == 1
     assert "- review 🔍 momus · omo_g · t1:review" in action.text
 
 
@@ -243,7 +247,8 @@ def test_single_dispatch_without_run_created_still_names_the_goal():
         {"run_id": "omo_1", "goal": "fix the bug", "agent": "hephaestus", "task": "fix the bug"},
     )
     assert action.kind == "post"
-    assert action.text.splitlines()[0] == "🏗️ omo: hephaestus: fix the bug"
+    assert action.text.splitlines()[0] == "🏗️ omo · omo_1 — fix the bug"
+    assert "fix the bug · hephaestus · Deep Agent" in action.text
     assert "- run 🔁 omo_1" in action.text
 
 
@@ -255,4 +260,188 @@ def test_adopted_message_id_edits_instead_of_posting():
     action = tracker.apply("worker_running", _created())
     assert action.kind == "edit"
     assert action.message_id == "already-there"
-    assert "🏗️ omo: hephaestus: add live status" in action.text
+    assert "🏗️ omo · omo_1 — add live status" in action.text
+
+
+# ── T2 review flag: read off the payload, never inferred ──────────────────────
+
+
+def test_run_created_review_flag_is_read_off_the_payload_not_inferred():
+    tracker, _ = _tracker()
+    with_review = tracker.apply("run_created", _graph(review=True))
+    without = tracker.apply("run_created", {**_graph(), "run_id": "omo_nr", "review": False})
+    assert "- review" in with_review.text
+    # A run declared without review must not grow a review row at all.
+    assert "- review" not in without.text
+
+
+def test_review_row_still_resolves_the_verdict_when_enabled():
+    tracker, clock = _tracker()
+    tracker.apply("run_created", _graph(review=True))
+    tracker.note_message_id("omo_g", "1")
+    clock.advance(10)
+    action = tracker.apply(
+        "review_verdict",
+        {"run_id": "omo_g", "agent": "hephaestus", "task_id": "t1", "verdict": "pass", "reviewer": "momus", "cycle": 2},
+    )
+    assert "- review ✅ momus · pass (cycle 2)" in action.text
+
+
+# ── T3 stopped rows name the reason, not the task text ────────────────────────
+
+
+def test_failed_worker_row_names_the_error_not_the_task():
+    tracker, clock = _tracker()
+    tracker.apply("worker_running", _created())
+    tracker.note_message_id("omo_1", "1")
+    clock.advance(10)
+    action = tracker.apply("worker_failed", {**_created(), "error": "402 credits exhausted"})
+    assert "- run ❌ 402 credits exhausted" in action.text
+    assert "add live status · hephaestus" in action.text  # the task text stays on the label
+
+
+def test_cancelled_worker_row_names_a_cause():
+    tracker, clock = _tracker()
+    tracker.apply("worker_running", _created())
+    tracker.note_message_id("omo_1", "1")
+    clock.advance(10)
+    action = tracker.apply("worker_cancelled", _created())
+    assert "- run ⏸ cancelled" in action.text
+
+
+def test_task_settled_failed_names_the_error():
+    tracker, clock = _tracker()
+    tracker.apply("run_created", _graph())
+    tracker.note_message_id("omo_g", "1")
+    tracker.apply("task_started", {"run_id": "omo_g", "agent": "hephaestus", "task_id": "t1", "task": "write the code"})
+    clock.advance(10)
+    action = tracker.apply(
+        "task_settled",
+        {"run_id": "omo_g", "agent": "hephaestus", "task_id": "t1", "status": "failed", "error": "provider 500"},
+    )
+    assert "- run ❌ provider 500" in action.text
+
+
+# ── T4 activity line: the worker's real tool call, refreshed on the cadence ────
+
+
+def test_activity_provider_feeds_the_line_with_the_real_tool_call():
+    def provider(session, agent):
+        return "📖 read_file a.py"
+
+    tracker, _ = _tracker(activity_provider=provider)
+    action = tracker.apply("worker_running", _created(activity_session="s1"))
+    assert "  ↳ 📖 read_file a.py" in action.text
+    assert "cycling:" not in action.text
+
+
+def test_activity_line_changes_when_the_tool_changes():
+    seen = {"tool": "read_file"}
+
+    def provider(session, agent):
+        return {"read_file": "📖 read_file a.py", "patch": "🔧 patch b.py"}[seen["tool"]]
+
+    tracker, clock = _tracker(activity_provider=provider)
+    first = tracker.apply("worker_running", _created(activity_session="s1"))
+    tracker.note_message_id("omo_1", "1")
+    assert "📖 read_file a.py" in first.text
+    seen["tool"] = "patch"
+    clock.advance(DEFAULT_PHRASE_INTERVAL + 0.1)
+    action = tracker.tick()
+    assert len(action) == 1 and action[0].kind == "edit"
+    assert "🔧 patch b.py" in action[0].text
+
+
+def test_activity_falls_back_to_the_canned_phrase_when_unobservable():
+    tracker, _ = _tracker(activity_provider=lambda session, agent: None)
+    action = tracker.apply("worker_running", _created(activity_session="s1"))
+    assert "  ↳ cycling:" in action.text
+    assert action.text.splitlines()[-1].strip() != "↳"  # the line is never blank
+
+
+# ── T5 model + hop on the live rows ───────────────────────────────────────────
+
+
+def test_serving_model_rides_the_run_row():
+    tracker, _ = _tracker()
+    action = tracker.apply("worker_running", {**_created(), "model": "minimax-m3"})
+    assert "- run 🔁 omo_1 · minimax-m3" in action.text
+
+
+def test_fallback_hop_shares_the_activity_line():
+    tracker, _ = _tracker()
+    action = tracker.apply("worker_running", {**_created(), "hop": "claude-sonnet-5 (rate limit)"})
+    assert "- run 🔁 omo_1" in action.text  # the model/hop do not pollute the run row
+    assert "⤵ claude-sonnet-5 (rate limit)" in action.text
+    assert action.text.splitlines()[-1].count("⤵") == 1
+
+
+# ── role plumbing ─────────────────────────────────────────────────────────────
+
+
+def test_agent_role_rides_the_worker_line():
+    tracker, _ = _tracker()
+    action = tracker.apply("worker_running", {**_created(), "display": "hephaestus · Deep Agent"})
+    assert "add live status · hephaestus · Deep Agent" in action.text
+
+
+# ── T7 the struct moves: post fresh, drop the previous, terminal stops ─────────
+
+
+def _two_worker_graph():
+    return {
+        "run_id": "omo_g",
+        "goal": "ship the feature",
+        "review": False,
+        "workers": [
+            {"agent": "hephaestus", "task_id": "t1", "task": "write the code"},
+            {"agent": "explore", "task_id": "t2", "task": "map the repo"},
+        ],
+    }
+
+
+def test_move_posts_a_fresh_struct_once_the_cadence_elapses():
+    tracker, clock = _tracker()
+    tracker.apply("run_created", _two_worker_graph())
+    tracker.note_message_id("omo_g", "1")
+    assert tracker.move_interval == DEFAULT_MOVE_INTERVAL
+    clock.advance(DEFAULT_MOVE_INTERVAL + 0.1)
+    action = tracker.apply(
+        "task_started", {"run_id": "omo_g", "agent": "hephaestus", "task_id": "t1", "task": "write the code"}
+    )
+    assert action.kind == "move"
+    assert action.message_id == "1"  # the previous struct is the one to delete
+
+
+def test_change_inside_the_move_interval_edits_in_place():
+    tracker, clock = _tracker()
+    tracker.apply("run_created", _two_worker_graph())
+    tracker.note_message_id("omo_g", "1")
+    clock.advance(DEFAULT_MIN_EDIT_INTERVAL + 0.1)  # past the edit throttle, before the move cadence
+    assert tracker.move_interval > DEFAULT_MIN_EDIT_INTERVAL
+    action = tracker.apply(
+        "task_started", {"run_id": "omo_g", "agent": "hephaestus", "task_id": "t1", "task": "write the code"}
+    )
+    assert action.kind == "edit"
+
+
+def test_terminal_state_stops_moving_and_the_final_struct_stays():
+    tracker, clock = _tracker()
+    tracker.apply("worker_running", _created())
+    tracker.note_message_id("omo_1", "1")
+    clock.advance(DEFAULT_MOVE_INTERVAL + 30)
+    action = tracker.apply("worker_succeeded", _created())
+    assert action.kind == "edit"  # terminal: edit, never move
+    clock.advance(10_000)
+    assert tracker.tick() == []
+
+
+def test_a_gone_stored_id_posts_fresh_never_a_dead_edit_loop():
+    tracker, clock = _tracker()
+    tracker.adopt("omo_1", "stale")
+    assert tracker.apply("worker_running", _created()).kind == "edit"
+    # The edit found the stored id gone; the notifier clears it.
+    tracker.note_message_id("omo_1", None)
+    clock.advance(DEFAULT_MOVE_INTERVAL + 1)
+    action = tracker.apply("worker_succeeded", _created())
+    assert action.kind == "post"

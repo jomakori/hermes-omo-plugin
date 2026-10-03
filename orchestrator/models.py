@@ -69,6 +69,10 @@ class Worker:
     review_cycles: int = 0
     review_verdict: str = ""
     hop_history: list[dict[str, str]] = field(default_factory=list)
+    # The child session this worker runs in, resolved at launch (the launch handle
+    # names no session, so the profile's newest session at launch is pinned here).
+    # The status line reads the worker's live tool call from it.
+    activity_session: str | None = None
 
     def as_row(self) -> dict[str, Any]:
         spec = agent(self.agent_name)
@@ -109,6 +113,7 @@ class Worker:
             "review_cycles": self.review_cycles,
             "review_verdict": self.review_verdict,
             "hop_history": [hop for hop in self.hop_history if isinstance(hop, dict)],
+            "activity_session": self.activity_session,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         }
@@ -133,6 +138,7 @@ class Worker:
             review_cycles=as_int(payload.get("review_cycles"), 0),
             review_verdict=str(payload.get("review_verdict") or ""),
             hop_history=[hop for hop in payload.get("hop_history") or () if isinstance(hop, dict)],
+            activity_session=as_optional_str(payload.get("activity_session")),
             started_at=as_float(payload.get("started_at")),
             finished_at=None if finished is None else as_float(finished),
         )

@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from orchestrator import session
 from orchestrator.boundary import claim_boundary
+from orchestrator.chains import HOP_REASON_SUCCESS
 from orchestrator.guards import GuardError
 from orchestrator.models import (
     BLOCKED,
@@ -35,6 +36,20 @@ REVIEW_INSTRUCTION = (
     "Review the work above as an internal critic. Reply with JSON only, no prose: "
     '{"verdict": "pass"|"problems", "problems": ["<what is wrong>", ...]}'
 )
+
+
+def _hop_note(worker: Worker) -> str:
+    """The last *failed* hop of the chain walk, as ``model (reason)`` (or "")."""
+    for hop in reversed(worker.hop_history):
+        if not isinstance(hop, dict):
+            continue
+        reason = str(hop.get("reason") or "").strip()
+        if not reason or reason == HOP_REASON_SUCCESS:
+            continue
+        model = str(hop.get("model") or "").strip()
+        human = reason.replace("_", " ")
+        return f"{model} ({human})" if model else f"({human})"
+    return ""
 
 
 class TaskGraph:
@@ -153,7 +168,15 @@ class TaskGraph:
                 "run_id": run.run_id,
                 "goal": run.goal,
                 "review": bool(self.review),
-                "workers": [{"agent": w.agent_name, "task_id": w.task_id, "task": w.task} for w in run.workers],
+                "workers": [
+                    {
+                        "agent": w.agent_name,
+                        "task_id": w.task_id,
+                        "task": w.task,
+                        "display": (AGENTS[w.agent_name].display if w.agent_name in AGENTS else w.agent_name),
+                    }
+                    for w in run.workers
+                ],
             },
         )
         return run
@@ -220,7 +243,13 @@ class TaskGraph:
 
     @staticmethod
     def _task_event(run: Run, worker: Worker) -> dict[str, Any]:
-        """The payload every task progress event carries."""
+        """The payload every task progress event carries.
+
+        Mirrors the engine's worker payload: the roster display, the serving
+        model, the worker's error (so a stopped row names its reason), and the
+        chain hop it fell back to all ride along for the live message.
+        """
+        spec = AGENTS.get(worker.agent_name)
         return {
             "run_id": run.run_id,
             "goal": run.goal,
@@ -229,6 +258,11 @@ class TaskGraph:
             "task": worker.task,
             "run_ref": worker.task_id or run.run_id,
             "status": worker.status,
+            "display": spec.display if spec is not None else worker.agent_name,
+            "model": worker.model or "",
+            "error": worker.error or "",
+            "hop": _hop_note(worker),
+            "activity_session": worker.activity_session or "",
         }
 
     def _run_one(self, run: Run, worker: Worker) -> None:

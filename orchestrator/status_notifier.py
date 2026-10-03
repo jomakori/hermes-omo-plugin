@@ -170,6 +170,17 @@ class StatusNotifier:
                     self._tracker.note_message_id(action.run_key, str(message_id))
                     self._record(action.run_key, str(message_id))
                 return
+            if action.kind == "move":
+                # The struct follows the conversation: post the fresh copy below,
+                # drop the previous one, then keep the new id — in that order, so
+                # a failed post leaves the old struct in place rather than losing
+                # the only live message.
+                message_id = _await(transport.post(action.run_key, action.text), loop)
+                if message_id:
+                    self._delete(transport, action.run_key, action.message_id, loop)
+                    self._tracker.note_message_id(action.run_key, str(message_id))
+                    self._record(action.run_key, str(message_id))
+                return
             ok = _await(transport.edit(action.run_key, str(action.message_id), action.text), loop)
             if not ok and getattr(transport, "last_gone", False):
                 # The message is gone (deleted, or a different process owns it):
@@ -178,6 +189,23 @@ class StatusNotifier:
                 self._record(action.run_key, None)
         except Exception:  # pragma: no cover - best effort by contract
             logger.debug("OMO status delivery failed for %s", action.run_key, exc_info=True)
+
+    def _delete(self, transport: Any, run_key: str, message_id: str | None, loop: Any) -> None:
+        """Delete the previous struct after a move; best-effort, never fatal.
+
+        A platform without a deletion API, a message already gone, or a network
+        blip all leave the previous copy behind — the new id is tracked either
+        way, so exactly the tracked struct stays live.
+        """
+        if not message_id:
+            return
+        delete = getattr(transport, "delete", None)
+        if not callable(delete):
+            return
+        try:
+            _await(delete(run_key, str(message_id)), loop)
+        except Exception:  # pragma: no cover - best effort by contract
+            logger.debug("OMO status delete declined for %s (%s)", run_key, message_id, exc_info=True)
 
     def _record(self, run_key: str, message_id: str | None) -> None:
         setter = getattr(self._engine, "note_status_message", None)

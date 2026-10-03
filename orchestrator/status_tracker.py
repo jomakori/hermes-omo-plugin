@@ -1,23 +1,32 @@
-"""Turn OMO progress events into ONE status message per run.
+"""Turn OMO progress events into ONE live status message per run.
 
 This is the tested half of the live status feature: it owns the run-state
-machine, the in-place-edit throttle, the no-op dedupe and the rotating phrase,
-and it touches neither Discord nor the clock — both are injected. The threaded
-delivery shell lives in ``status_notifier`` so the rules below can be exercised
-with a fake clock and no gateway in the loop.
+machine, the edit/move cadence, the no-op dedupe and the rotating phrase, and it
+touches neither Discord nor the clock — both are injected (the worker-activity
+reader is injected too). The threaded delivery shell lives in ``status_notifier``
+so the rules below can be exercised with a fake clock and no gateway in the loop.
 
 Rules encoded here:
 
-* one message per ``run_id`` — the first render posts, every later one edits;
-* an edit is skipped when the rendered text is unchanged (no-op dedupe) and
+* one message per ``run_id`` — the first render posts, every later one updates it;
+* the goal is stated once, in the run heading; every worker carries a condensed
+  label (its ticket id, else its first clause) instead of a second copy of the goal;
+* an update whose rendered text is unchanged is skipped (no-op dedupe) and
   otherwise throttled to at least ``min_edit_interval`` seconds apart;
-* a throttled edit is remembered as *pending* and flushed on the next tick, so
+* a throttled update is remembered as *pending* and flushed on the next tick, so
   a fast burst of transitions never loses the last state;
-* the running phase carries a rotating ``↳ cycling:`` phrase, advanced on the
-  rotation timer (``status_rotation``);
+* the live struct *moves*: once per ``move_interval`` a changed render is posted
+  fresh below the newest message, the previous one deleted, and the new id kept.
+  Inside that cadence the current struct is edited in place so it stays fresh;
+* a terminal state stops the moving — it forces one final in-place edit and the
+  final struct stays where it is;
+* the running phase carries the worker's real tool call (``{emoji} {tool}
+  {target}``) when one is observable, falling back to the rotating ``↳ cycling:``
+  phrase so the line is never blank;
 * a review is folded into the producing worker's block: the reviewer's own run
   events name the ``review`` row of that block, never a block of their own;
-* a terminal state always forces a final edit, ignoring the throttle.
+* the run's ``review`` flag is read off the payload, never inferred: no flag means
+  no review row at all.
 """
 
 from __future__ import annotations
@@ -27,12 +36,21 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from orchestrator.status_message import DEFAULT_MAX_CHARS, PHASES, render_status
+from orchestrator.status_message import (
+    DEFAULT_MAX_CHARS,
+    PHASES,
+    condense_label,
+    label_limit,
+    render_status,
+)
 from orchestrator.status_rotation import ROTATE_INTERVAL_SECONDS, cycling_phrase
+from roster import AGENTS
 
 DEFAULT_MIN_EDIT_INTERVAL = 2.0
 # Kept as the phrase-timer default; the interval itself lives with the phrases.
 DEFAULT_PHRASE_INTERVAL = ROTATE_INTERVAL_SECONDS
+# The live struct moves on its own, gentler cadence than the edit throttle.
+DEFAULT_MOVE_INTERVAL = 5.0
 
 # Run-phase statuses that mean "this worker is finished".
 _SETTLED_RUN = ("done", "failed", "cancelled", "blocked", "interrupted")
@@ -45,9 +63,14 @@ _REVIEW_SUFFIX = ":review"
 
 @dataclass
 class Action:
-    """A delivery instruction for the notifier: post once, then edit in place."""
+    """A delivery instruction for the notifier.
 
-    kind: str  # "post" | "edit"
+    ``post`` sends a fresh message; ``edit`` updates ``message_id`` in place;
+    ``move`` sends a fresh message and then deletes ``message_id`` (the previous
+    struct), keeping exactly the newest one live.
+    """
+
+    kind: str  # "post" | "edit" | "move"
     run_key: str
     text: str
     message_id: str | None = None
@@ -62,6 +85,7 @@ class _Phase:
     detail: str = ""
     duration: str = ""
     cause: str = ""
+    model: str = ""
     reviewer: str = ""
     verdict: str = ""
     cycle: int = 0
@@ -71,7 +95,11 @@ class _Phase:
 class _Block:
     key: str = ""
     agent: str = "?"
+    display: str = ""
     process: str = ""
+    activity_session: str = ""
+    activity: str = ""
+    hop: str = ""
     phases: list[_Phase] = field(default_factory=list)
     started_at: float | None = None
 
@@ -92,9 +120,14 @@ class _RunState:
     run_key: str
     blocks: list[_Block] = field(default_factory=list)
     process: str = ""
+    # The review flag exactly as the run_created payload carried it; no key means
+    # no review, so the review row is never inferred into existence.
+    review: bool = False
+    fanout: int = 0
     message_id: str | None = None
     last_text: str = ""
     last_edit_at: float = float("-inf")
+    last_move_at: float = float("-inf")
     phrase_index: int = 0
     phrase_at: float = float("-inf")
     pending: bool = False
@@ -110,12 +143,24 @@ class StatusTracker:
         clock: Callable[[], float] = time.monotonic,
         min_edit_interval: float = DEFAULT_MIN_EDIT_INTERVAL,
         phrase_interval: float = DEFAULT_PHRASE_INTERVAL,
+        move_interval: float = DEFAULT_MOVE_INTERVAL,
         max_chars: int = DEFAULT_MAX_CHARS,
+        activity_provider: Callable[[str, str], str | None] | None = None,
+        activity_interval: float | None = None,
     ) -> None:
         self._clock = clock
         self.min_edit_interval = max(0.0, float(min_edit_interval))
         self.phrase_interval = max(0.0, float(phrase_interval))
+        self.move_interval = max(0.0, float(move_interval))
         self.max_chars = max_chars
+        # Optional, injected: reads the worker's live tool call from its profile
+        # state DB. Absent (the default) means no activity is observable and the
+        # canned phrase is used — the tracker stays pure.
+        self._activity_provider = activity_provider
+        self.activity_interval = max(
+            0.0, float(self.phrase_interval if activity_interval is None else activity_interval)
+        )
+        self._activity_cache: dict[str, tuple[float, str]] = {}
         self._runs: dict[str, _RunState] = {}
 
     # ── public surface ────────────────────────────────────────────────
@@ -167,7 +212,13 @@ class StatusTracker:
         state.message_id = message_id or None
 
     def adopt(self, run_key: str, message_id: str | None) -> None:
-        """Seed a persisted message id so a restart edits instead of re-posting."""
+        """Seed a persisted message id so a restart edits instead of re-posting.
+
+        The adopted struct is treated as freshly placed: the next update edits it
+        in place, and only a later change past the move cadence moves it. A stored
+        id that is gone is cleared by the notifier's failed edit, after which the
+        next emit posts fresh.
+        """
         if not message_id:
             return
         state = self._runs.get(run_key)
@@ -175,6 +226,7 @@ class StatusTracker:
             state = _RunState(run_key=run_key)
             self._runs[run_key] = state
         state.message_id = message_id
+        state.last_move_at = self._clock()
 
     # ── state construction ────────────────────────────────────────────
     def _state_for(self, run_key: str) -> _RunState:
@@ -188,7 +240,15 @@ class StatusTracker:
         name = str(agent or "?").strip() or "?"
         task = str(task_id or "").strip()
         key = task or f"agent:{name}"
-        return _Block(key=key, agent=name, process=process, phases=[_Phase(p) for p in PHASES])
+        # The roster display (`hephaestus · Deep Agent`) is the fallback: a payload
+        # that already carries it (the engine/graph do) overrides it in `_enrich`.
+        return _Block(
+            key=key,
+            agent=name,
+            display=_display_for(name),
+            process=process,
+            phases=[_Phase(p) for p in PHASES],
+        )
 
     def _block(self, state: _RunState, agent: Any, task_id: Any, process: str = "") -> _Block:
         task = str(task_id or "").strip()
@@ -226,9 +286,27 @@ class StatusTracker:
         return all(block.run_status() in _SETTLED_RUN for block in state.blocks)
 
     # ── rendering ─────────────────────────────────────────────────────
-    def _render(self, state: _RunState) -> str:
-        blocks: list[dict[str, Any]] = []
+    def _activity_for(self, block: _Block, now: float) -> str:
+        """The worker's real tool call, cached on the rotation cadence."""
+        if self._activity_provider is None or not block.activity_session:
+            return block.activity
+        session = block.activity_session
+        cached = self._activity_cache.get(session)
+        if cached is not None and (now - cached[0]) < self.activity_interval:
+            return cached[1]
+        try:
+            value = self._activity_provider(session, block.agent)
+        except Exception:
+            value = None
+        text = str(value).strip() if value else ""
+        self._activity_cache[session] = (now, text)
+        return text
+
+    def _render(self, state: _RunState, now: float) -> str:
+        limit = label_limit(state.fanout or len(state.blocks))
+        workers: list[dict[str, Any]] = []
         for index, block in enumerate(state.blocks):
+            run_phase = block.phase("run")
             phases: list[dict[str, Any]] = []
             for phase in block.phases:
                 rendered: dict[str, Any] = {"name": phase.name, "status": phase.status}
@@ -238,6 +316,7 @@ class StatusTracker:
                     rendered["detail"] = phase.detail
                     rendered["duration"] = phase.duration
                     rendered["cause"] = phase.cause
+                    rendered["model"] = phase.model
                     if phase.status == "current":
                         rendered["phrase"] = cycling_phrase("run", state.phrase_index + index)
                         rendered["rotate_seconds"] = int(self.phrase_interval)
@@ -249,14 +328,35 @@ class StatusTracker:
                     rendered["cycle"] = phase.cycle
                     rendered["cause"] = phase.cause
                 phases.append(rendered)
-            blocks.append({"agent": block.agent, "process": block.process, "phases": phases})
-        return render_status(blocks, max_chars=self.max_chars)
+            activity = self._activity_for(block, now) if run_phase.status == "current" else ""
+            workers.append(
+                {
+                    "agent": block.agent,
+                    "display": block.display or block.agent,
+                    "process": block.process,
+                    "label": condense_label(block.process, limit),
+                    "label_limit": limit,
+                    "review": state.review,
+                    "model": run_phase.model,
+                    "activity": activity,
+                    "hop": block.hop if run_phase.status == "current" else "",
+                    "phases": phases,
+                }
+            )
+        run = {
+            "run_id": state.run_key,
+            "goal": state.process,
+            "review": state.review,
+            "workers": workers,
+        }
+        return render_status(run, max_chars=self.max_chars)
 
     def _maybe_emit(self, state: _RunState, now: float, *, force: bool) -> Action | None:
-        text = self._render(state)
+        text = self._render(state, now)
         if not state.message_id:
             state.last_text = text
             state.last_edit_at = now
+            state.last_move_at = now
             state.pending = False
             return Action("post", state.run_key, text)
         if text == state.last_text:
@@ -268,6 +368,16 @@ class StatusTracker:
         state.last_text = text
         state.last_edit_at = now
         state.pending = False
+        # The struct moves on its own cadence — never on the terminal edit, which
+        # must leave the final struct exactly where it is.
+        if (
+            not force
+            and not state.terminal
+            and self.move_interval > 0.0
+            and (now - state.last_move_at) >= self.move_interval
+        ):
+            state.last_move_at = now
+            return Action("move", state.run_key, text, state.message_id)
         return Action("edit", state.run_key, text, state.message_id)
 
     # ── event reduction ───────────────────────────────────────────────
@@ -276,6 +386,18 @@ class StatusTracker:
         if handler is not None:
             handler(self, state, payload, now)
 
+    def _enrich(self, block: _Block, payload: dict[str, Any]) -> None:
+        """Carry the launch facts a worker event teaches us onto its block."""
+        display = str(payload.get("display") or "").strip()
+        if display:
+            block.display = display
+        session = str(payload.get("activity_session") or "").strip()
+        if session:
+            block.activity_session = session
+        hop = str(payload.get("hop") or "").strip()
+        if hop:
+            block.hop = hop
+
     def _start(self, block: _Block, payload: dict[str, Any], now: float) -> None:
         block.phase("dispatch").status = "done"
         run = block.phase("run")
@@ -283,6 +405,8 @@ class StatusTracker:
         run.run_id = str(payload.get("run_id") or "")
         run.task_id = str(payload.get("task_id") or payload.get("run_ref") or "")
         run.detail = str(payload.get("task") or payload.get("goal") or block.process or "").strip()
+        run.model = str(payload.get("model") or run.model or "").strip()
+        self._enrich(block, payload)
         if block.started_at is None:
             block.started_at = now
 
@@ -290,10 +414,26 @@ class StatusTracker:
         block.phase("dispatch").status = "done"
         run = block.phase("run")
         run.status = status
+        run.task_id = str(payload.get("task_id") or run.task_id or "")
+        run.model = str(payload.get("model") or run.model or "").strip()
+        # A stopped row names its reason instead of echoing the task text.
+        cause = str(payload.get("cause") or payload.get("error") or "").strip()
         if status == "done":
             run.duration = _format_duration(block.started_at, now)
+        elif not cause:
+            run.cause = "cancelled" if status == "cancelled" else ""
         else:
-            run.cause = str(payload.get("cause") or payload.get("error") or "").strip()
+            run.cause = cause
+        # The worker is no longer live: its activity and hop must not linger.
+        block.activity = ""
+        block.hop = ""
+
+
+def _display_for(agent_name: str) -> str:
+    """The roster display for an agent (``name · role``), or the bare name."""
+    name = str(agent_name or "").strip()
+    spec = AGENTS.get(name)
+    return spec.display if spec is not None else name
 
 
 def _format_duration(started_at: float | None, now: float) -> str:
@@ -311,8 +451,11 @@ def _format_duration(started_at: float | None, now: float) -> str:
 # ── event handlers (kept as free functions so the mapping is one table) ──
 def _h_run_created(tracker: StatusTracker, state: _RunState, payload: dict[str, Any], now: float) -> None:
     state.process = str(payload.get("goal") or payload.get("process") or state.process or "").strip()
+    # Read the review flag straight off the payload: no key means no review row.
+    state.review = bool(payload.get("review", False))
     workers = payload.get("workers") or []
     if workers:
+        state.fanout = len([w for w in workers if isinstance(w, dict)])
         for entry in workers:
             if not isinstance(entry, dict):
                 continue
@@ -320,8 +463,12 @@ def _h_run_created(tracker: StatusTracker, state: _RunState, payload: dict[str, 
             # The block's headline is its own task when the run declared one;
             # otherwise the run's goal stands in.
             block.process = str(entry.get("task") or state.process or "").strip()
+            display = str(entry.get("display") or "").strip()
+            if display:
+                block.display = display
         return
     agents = payload.get("agents") or ([payload.get("agent")] if payload.get("agent") else [])
+    state.fanout = len(agents)
     for name in agents:
         tracker._block(state, name, payload.get("task_id"))
 
@@ -365,7 +512,7 @@ def _h_worker_interrupted(tracker: StatusTracker, state: _RunState, payload: dic
     run = block.phase("run")
     run.status = "interrupted"
     run.task_id = str(payload.get("task_id") or "")
-    run.cause = str(payload.get("cause") or "gateway restart").strip()
+    run.cause = str(payload.get("cause") or payload.get("error") or "gateway restart").strip()
 
 
 def _h_review_verdict(tracker: StatusTracker, state: _RunState, payload: dict[str, Any], now: float) -> None:
@@ -396,6 +543,8 @@ def _h_run_finished(tracker: StatusTracker, state: _RunState, payload: dict[str,
         run = block.phase("run")
         if run.status in ("pending", "current"):
             run.status = "done" if overall == "done" else overall
+        block.activity = ""
+        block.hop = ""
     state.terminal = True
 
 
@@ -461,6 +610,7 @@ _HANDLERS: dict[str, Callable[[StatusTracker, _RunState, dict[str, Any], float],
 
 __all__ = [
     "DEFAULT_MIN_EDIT_INTERVAL",
+    "DEFAULT_MOVE_INTERVAL",
     "DEFAULT_PHRASE_INTERVAL",
     "ROTATE_INTERVAL_SECONDS",
     "Action",

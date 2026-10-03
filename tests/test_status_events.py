@@ -360,8 +360,11 @@ def test_declared_graph_creates_one_message_and_edits_it_per_state_change():
     assert next(iter(engine.runs.values())).status_message_id == "9001"
 
     final = transport.edits[-1][2]
-    assert final.count("🏗️ omo:") == 2
-    assert "- run ✅" in final
+    # One run heading, then one condensed label per worker with its status rows.
+    assert final.count("🏗️ omo") == 1
+    assert "map the repo · explore · Repository Exploration" in final
+    assert "write the fix · hephaestus · Deep Agent" in final
+    assert final.count("- run ✅") == 2
 
 
 def test_declared_graph_review_row_folds_into_the_producer_block():
@@ -382,3 +385,54 @@ def test_declared_graph_review_row_folds_into_the_producer_block():
     # the reviewer ran: 🔍 named it mid-flight, then the verdict settled the row
     assert any("- review 🔍 momus · " in text for text in texts)
     assert any("- review ✅ momus · pass" in text for text in texts)
+
+
+# ── T3/T5 payload plumbing: the reason, the model, the hop, the session ──
+def test_engine_worker_failed_payload_carries_the_error_and_display():
+    ctx, engine = make_engine(ScriptedLifecycle(fail_from=1), config={"max_attempts_per_agent": 3})
+    engine.dispatch(goal="do the impossible", target="hephaestus")
+
+    payloads = [payload for name, payload in ctx.events if name == "worker_failed"]
+    assert payloads, "worker_failed must fire"
+    first = payloads[0]
+    # the reason the row shows is the error, not the task text
+    assert first["error"] and first["error"] != first["task"]
+    assert first["display"] == "hephaestus · Deep Agent"
+    assert "model" in first and "activity_session" in first
+
+
+def test_engine_worker_running_payload_carries_model_display_and_session_key():
+    ctx, engine = make_engine(ScriptedLifecycle())
+    engine.dispatch(goal="add a widget", target="hephaestus")
+
+    running = [payload for name, payload in ctx.events if name == "worker_running"][0]
+    assert running["display"] == "hephaestus · Deep Agent"
+    assert running["model"]  # the serving model rides the run row
+    assert "activity_session" in running
+
+
+def test_hop_note_names_only_a_failed_hop_with_its_reason():
+    worker = Worker(run_id="omo_x", agent_name="hephaestus", task="t", chain=("a", "b"), model="glm-5.3")
+    worker.hop_history = [
+        {"model": "minimax-m3", "reason": "rate_limit"},
+        {"model": "glm-5.3", "reason": "success"},
+    ]
+    assert OmoEngine._hop_note(worker) == "minimax-m3 (rate limit)"
+
+    worker.hop_history = [{"model": "glm-5.3", "reason": "success"}]
+    assert OmoEngine._hop_note(worker) == ""
+
+
+def test_graph_task_settled_payload_carries_the_worker_error():
+    ctx, engine = make_engine(ScriptedLifecycle(fail_from=1))
+    engine.dispatch_graph(
+        tasks=[
+            {"id": "explore", "agent": "explore", "prompt": "map the repo"},
+            {"id": "write", "agent": "hephaestus", "prompt": "write the fix", "depends_on": ["explore"]},
+        ],
+        goal="fix the bug",
+    )
+
+    settled = [payload for name, payload in ctx.events if name == "task_settled"]
+    failed = [payload for payload in settled if str(payload.get("status")).lower() == "failed"]
+    assert failed and failed[0]["error"]

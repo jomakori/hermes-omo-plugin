@@ -52,9 +52,11 @@ plugins:
         max_persisted_runs: 50   # runs kept in that record; 0 keeps everything
         max_parallel: 4          # tasks in flight for one graph dispatch
         max_review_cycles: 1     # reviewer passes per task; 0 disables review
-        status_message_enabled: true     # one live Discord message per run, edited in place
+        status_message_enabled: true     # one live status message per run
         status_edit_interval: 2.0        # seconds between edits (throttle floor)
-        status_phrase_interval: 3.0      # seconds between rotating phrase lines
+        status_move_interval: 5.0        # seconds between struct moves (post fresh + delete old)
+        status_phrase_interval: 3.0      # seconds between rotating phrase lines / activity refresh
+        # activity_profiles_dir: /data/profiles   # optional; defaults to <hermes home>/profiles
         enabled_agents: []       # empty = the whole roster; list names to restrict it
         roles:                   # caller-facing role names -> roster entries
           implementer: hephaestus
@@ -108,75 +110,112 @@ ran.
 
 ## Live status message
 
-Every run posts **one** message to the conversation that dispatched it and then
-**edits that same message in place** as the run moves — one message per `run_id`,
-never a second. A graph run with four workers still owns a single message; each
-worker is a header block inside it. So `status_message_enabled: false` turns the
-whole surface off.
+Every run owns **one** live struct in the conversation that dispatched it — one
+per `run_id`, never a second. The struct **moves**: while the run is active it is
+re-posted below the newest message and the previous copy deleted (so it follows
+the conversation instead of being buried by it), with in-place edits keeping it
+current between moves. A graph run with four workers still owns a single struct;
+each worker is one condensed block inside it. So `status_message_enabled: false`
+turns the whole surface off.
 
 ```
-🏗️ omo: hephaestus: OKT-161 — shell parity
-- dispatch ✅
-- run 🔁 omo_304bf8e5 · t4 — wiring the nav badge semantics
-  ↳ cycling: patching components/shell.rs… (3s)
+🏗️ omo · omo_304bf8e5 — shell parity across the fleet · 3 workers
+
+OKT-161 · hephaestus · Deep Agent
+- run 🔁 t4 · minimax-m3
+  ↳ ✍️ write_file components/shell.rs · ⤵ claude-sonnet-5 (rate limit)
 - review ⏳
 
-🏗️ omo: metis: analysis stage — openagent chart
-- dispatch ✅
+analysis stage · metis · Plan Consultant
 - run ⛔ waiting on prometheus
 - review ⏳
 
-🏗️ omo: oracle: architecture
-- dispatch ✅
+architecture · oracle · Architecture / Reasoning
 - run ⚠️ gateway restart
 - review ✅ momus · problems (cycle 1)
 ```
 
-**Shape.** One header block per agent/worker, separated by a blank line. The
-header is exactly `🏗️ omo: <agent>: <process>`, where `<process>` is the worker's
-task (or the run's goal) truncated to 60 characters. Each block lists three
-phases in order — `dispatch`, `run`, `review` — one `- <phase> <emoji>` row each:
+**Shape.** The goal is stated **once** in the run heading —
+`🏗️ omo · <run_id> — <goal≤60>` (`· N workers` appended at fan-out) — and never
+repeated per worker. Each worker is then one block whose first line is
+`<label> · <agent display>`, where the display is the roster line from
+`roster.AgentSpec.display` (`hephaestus · Deep Agent`) and `<label>` is a
+condensed form of the task: the ticket id when one is present, else the first
+clause, cut on a word boundary to 24 characters at fan-out above 8 (44 otherwise).
+A long label is cut at a word boundary and never ends in an ellipsis — no rendered
+line does, apart from the deliberate `…N more` collapse marker.
+
+Each block lists three phases in order — `dispatch`, `run`, `review` — one
+`- <phase> <emoji>` row each. The `dispatch` row is dropped once the worker has
+started (the run row implies it), and the whole `review` row is dropped when the
+run was created with `review: false` (read straight off the payload, never
+inferred):
 
 | Emoji | Meaning |
 |---|---|
-| 🔁 | running — the row also carries `run_id · task_id — detail` |
+| 🔁 | running — the row also carries `task_id · <serving model>` |
 | ⏳ | pending |
 | ✅ | done — a finished run row carries its duration (`22m`) |
 | 🔍 | reviewing — `reviewer · run_id · task_id:review` |
 | ⛔ | blocked on a dependency — the cause is named (`waiting on prometheus`) |
 | ⚠️ | interrupted — the cause is named (`gateway restart`) |
-| ❌ | failed |
-| ⏸ | cancelled |
+| ❌ | failed — the cause is the worker's error, never an echo of the task |
+| ⏸ | cancelled — the cancellation cause |
 
-The 🔁 `run` row is the only one with a line under it — the rotating
-`  ↳ cycling: <phrase> (3s)` line, re-rendered every ~3s so the message visibly
-lives. Review rows are **folded into the producing worker's block** — the reviewer
-and verdict are named on the row (`review ✅ momus · problems (cycle 1)`,
+The 🔁 `run` row is the only one with a line under it: the worker's **real tool
+call**, `  ↳ {emoji} {tool} {target}` (emoji resolved from the host registry with
+`registry.get_emoji`, capped at ~48 characters), refreshed on the rotation
+cadence and changing when the tool changes. When the chain fell back the hop is
+appended on that same line (`· ⤵ claude-sonnet-5 (rate limit)`). Until a call is
+observable the rotating `  ↳ cycling: <phrase> (3s)` line stands, so the line is
+never blank. Review rows are **folded into the producing worker's block** — the
+reviewer and verdict are named on the row (`review ✅ momus · problems (cycle 1)`,
 `review 🔍 momus · <run> · <task>:review`), never a block of their own. A message
 is capped at Discord's 2000 characters: long block lists collapse with `…N more`,
 and only if even the headers overflow are trailing blocks folded into `…N more
 agents`.
 
-**Delivery.** The message is posted on the run's first transition and PATCHed on
-every later one. The message id is persisted on the run record
-(`state_path`), so a gateway restart keeps editing the same message; a fresh one
-is posted only when the stored id is gone (deleted, or unknown to the edit).
+**Delivery.** The struct is posted on the run's first transition. While the run is
+active it **moves** on `status_move_interval` (default 5s, gentler than the 2s
+edit throttle): a fresh copy is posted below the newest message, the previous copy
+is then deleted, and the new id is persisted — in that order, so a failed post
+leaves the previous struct in place rather than losing the only live one. Between
+moves, a changed render is edited in place. On a **terminal** state the struct
+stops moving: the final render is an edit, so the last struct stays exactly where
+it is. The id is persisted on the run record (`state_path`), so a gateway restart
+keeps the same message; a stored id that is **gone** falls back to posting fresh
+once, never to a dead edit loop. A move's delete is best-effort — a platform
+without a deletion API, or a failed delete, leaves the previous copy behind (the
+new id is tracked either way).
 
 **Keeping it alive.** The renderer is pure (`orchestrator/status_message.py`,
-run state → exact string) and the throttle/dedupe rules are a pure state machine
-(`orchestrator/status_tracker.py`, no Discord, no clock — both injected):
+run state → exact string) and the throttle/dedupe/move rules are a pure state
+machine (`orchestrator/status_tracker.py`, no Discord, no clock — both injected):
 
-- the first render posts; every later one edits the same id;
-- an edit whose text is unchanged is skipped entirely (no-op dedupe);
+- the first render posts; later changed renders edit, or move past the cadence;
+- a render whose text is unchanged is skipped entirely (no-op dedupe);
 - otherwise edits are throttled to at least `status_edit_interval` (default 2s);
 - a throttled change is remembered and flushed on the next tick, so a fast burst
   of transitions never loses the last state;
-- the in-progress `run` phrase rotates every `status_phrase_interval`
-  (default 3s) so the message stays visibly alive;
-- a terminal state **always** forces a final edit, ignoring the throttle.
+- the in-progress `run` phrase rotates and the worker's tool call is re-read every
+  `status_phrase_interval` (default 3s) so the message stays visibly alive;
+- a terminal state **always** forces a final edit, ignoring the throttle — and
+  never a move.
+
+**Activity.** The `  ↳` line is read from the worker's own Hermes profile store
+(`profiles/<agent>/state.db` → `messages`: `tool_name`, `tool_calls`, `timestamp`)
+by `orchestrator/worker_activity.py`. The launch handle names no child session
+(`SubagentHandle` carries `subagent_id`/`parent_session_id`/`correlation_id`, and
+the child's `sessions` row carries the *parent* id), so the mapping is the
+profile's **newest session at launch**, captured once and pinned on the worker;
+that is exact for one worker of an agent at a time and approximate when two of the
+same agent launch within the same instant. The emoji comes from the host tool
+registry at runtime (`registry.get_emoji(tool, default="⚡")`), never a hardcoded
+map. Any failure — no session, no DB, a locked or unreadable store — leaves the
+canned phrase in place.
 
 Delivery is best-effort by contract: a status message is a courtesy, so a failed
-post or edit never fails the run it describes. The adapter's HTTP session is bound
+post, move or edit never fails the run it describes. The adapter's HTTP session is bound
 to the gateway's event loop, so delivery is **scheduled onto that loop** from the
 status worker thread (`asyncio.run_coroutine_threadsafe`) rather than run on a
 fresh loop — the same cross-thread hop the host's own dispatch uses. There is **no
@@ -198,6 +237,12 @@ namespaces them as `omo:<name>`, so a pre-prefixed name is rejected):
 | `task_settled` | `graph.py` — a task's future completes |
 | `review_verdict` / `reviewer_failed` | `graph.py` — a review returns a verdict, or the reviewer itself fails |
 | `run_finished` | `graph.py` — the final payload is built |
+
+A worker event's payload carries the facts the live row needs beyond the ids: the
+roster `display`, the serving `model`, the worker's `error` (so a stopped row names
+its reason), the chain `hop` it fell back to (empty on success), and the
+`activity_session` its tool call is read from. `run_created` carries the `review`
+flag the renderer obeys.
 
 ## Task graphs
 
