@@ -153,7 +153,7 @@ inferred):
 
 | Emoji | Meaning |
 |---|---|
-| 🔁 | running — the row also carries `task_id · <serving model>` |
+| 🔁 | running — the row also carries `<task_id\|run_id> · <serving model>` |
 | ⏳ | pending |
 | ✅ | done — a finished run row carries its duration (`22m`) |
 | 🔍 | reviewing — `reviewer · run_id · task_id:review` |
@@ -161,6 +161,11 @@ inferred):
 | ⚠️ | interrupted — the cause is named (`gateway restart`) |
 | ❌ | failed — the cause is the worker's error, never an echo of the task |
 | ⏸ | cancelled — the cancellation cause |
+| ⏭ | skipped — mapped by `STATUS_EMOJI`; no live transition emits it yet |
+
+The renderer's map (`orchestrator/status_message.py`, `STATUS_EMOJI`) is the
+source of truth for that table; a status the tracker never produces still gets a
+glyph rather than `KeyError`.
 
 The 🔁 `run` row is the only one with a line under it: the worker's **real tool
 call**, `  ↳ {emoji} {tool} {target}` (emoji resolved from the host registry with
@@ -211,7 +216,21 @@ profile's **newest session at launch**, captured once and pinned on the worker;
 that is exact for one worker of an agent at a time and approximate when two of the
 same agent launch within the same instant. The emoji comes from the host tool
 registry at runtime (`registry.get_emoji(tool, default="⚡")`), never a hardcoded
-map. Any failure — no session, no DB, a locked or unreadable store — leaves the
+map — the plugin stores no tool→emoji table, so a new tool is rendered the moment
+the host registers it. The values the host currently holds for the tools a worker
+actually reaches for:
+
+| Tool | Emoji |
+|---|---|
+| `read_file` | 📖 |
+| `write_file` | ✍️ |
+| `patch` | 🔧 |
+| `search_files` | 🔎 |
+| `terminal` | 💻 |
+| `skill_manage` | 📝 |
+| anything unregistered | ⚡ (the `get_emoji` default) |
+
+Any failure — no session, no DB, a locked or unreadable store — leaves the
 canned phrase in place.
 
 Delivery is best-effort by contract: a status message is a courtesy, so a failed
