@@ -30,18 +30,30 @@ class SendResult:
 class StubAdapter:
     """Same method signatures as the real adapter (see discord adapter.py:2813/2993)."""
 
-    def __init__(self, *, fail_edit: bool = False, gone_edit: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_edit: bool = False,
+        gone_edit: bool = False,
+        fail_send: bool = False,
+        fail_delete: bool = False,
+    ) -> None:
         self.sent: list[dict] = []
         self.edited: list[dict] = []
+        self.deleted: list[dict] = []
         self.thread_ids: list[int] = []
         self.fail_edit = fail_edit
         self.gone_edit = gone_edit
+        self.fail_send = fail_send
+        self.fail_delete = fail_delete
         self.is_connected = True
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):
         self.thread_ids.append(threading.get_ident())
         self.sent.append({"chat_id": chat_id, "content": content, "reply_to": reply_to, "metadata": metadata})
-        return SendResult(success=True, message_id="msg-1")
+        if self.fail_send:
+            return SendResult(success=False, error="transient connection reset")
+        return SendResult(success=True, message_id=f"msg-{len(self.sent)}")
 
     async def edit_message(self, chat_id, message_id, content, *, finalize=False, metadata=None):
         self.thread_ids.append(threading.get_ident())
@@ -51,6 +63,11 @@ class StubAdapter:
         if self.fail_edit:
             return SendResult(success=False, error="transient connection reset")
         return SendResult(success=True)
+
+    async def delete_message(self, chat_id, message_id):
+        self.thread_ids.append(threading.get_ident())
+        self.deleted.append({"chat_id": chat_id, "message_id": message_id})
+        return not self.fail_delete
 
 
 class PlainRunner:
@@ -260,3 +277,82 @@ def test_delivery_without_a_gateway_loop_still_runs_locally():
     assert len(adapter.sent) == 1
     assert adapter.thread_ids == [threading.get_ident()]
     assert engine.recorded == [("omo_1", "msg-1")]
+
+
+# ── T7 the moving struct: delete the previous copy after the fresh post ──
+def test_delete_uses_the_adapter_delete_message_signature():
+    adapter = StubAdapter()
+    transport, _ = _transport(adapter)
+
+    assert asyncio.run(transport.delete("omo_1", "msg-1")) is True
+    assert adapter.deleted == [{"chat_id": "42", "message_id": "msg-1"}]
+
+
+def test_thread_route_deletes_the_message_in_the_thread_it_posted_to():
+    adapter = StubAdapter()
+    transport, _ = _transport(adapter, thread_id="t7")
+
+    assert asyncio.run(transport.delete("omo_1", "msg-1")) is True
+    assert adapter.deleted[0]["chat_id"] == "t7"
+
+
+def test_delete_without_an_adapter_is_a_silent_false():
+    transport, _ = _transport(None, runner=PlainRunner(adapter=None))
+
+    assert asyncio.run(transport.delete("omo_1", "msg-1")) is False
+
+
+def _moving_notifier(engine, transport, clock):
+    """A notifier whose tracker moves once the 5s cadence has elapsed."""
+    tracker = StatusTracker(clock=lambda: clock[0], min_edit_interval=0.0, move_interval=5.0)
+    return StatusNotifier(None, engine=engine, tracker=tracker, transport_factory=lambda route: transport)
+
+
+def test_move_posts_the_fresh_struct_then_deletes_the_previous_one():
+    adapter = StubAdapter()
+    transport, _ = _transport(adapter)
+    engine = ChunkOnlyEngine({"platform": "discord", "chat_id": "42"})
+    clock = [1000.0]
+    notifier = _moving_notifier(engine, transport, clock)
+
+    # First render posts msg-1; a later, changed render past the cadence moves it.
+    notifier.process("worker_running", {"run_id": "omo_1", "goal": "g", "agent": "hephaestus", "model": "a"})
+    clock[0] += 6.0
+    notifier.process("worker_running", {"run_id": "omo_1", "goal": "g", "agent": "hephaestus", "model": "b"})
+
+    assert len(adapter.sent) == 2
+    assert adapter.deleted == [{"chat_id": "42", "message_id": "msg-1"}]
+    # The new id is tracked and persisted; the previous one is gone.
+    assert engine.recorded[-1] == ("omo_1", "msg-2")
+
+
+def test_move_keeps_the_previous_struct_when_the_fresh_post_fails():
+    adapter = StubAdapter(fail_send=True)
+    transport, _ = _transport(adapter)
+    engine = ChunkOnlyEngine({"platform": "discord", "chat_id": "42"})
+    clock = [1000.0]
+    notifier = _moving_notifier(engine, transport, clock)
+
+    notifier.process("worker_running", {"run_id": "omo_1", "goal": "g", "agent": "hephaestus", "model": "a"})
+    clock[0] += 6.0
+    notifier.process("worker_running", {"run_id": "omo_1", "goal": "g", "agent": "hephaestus", "model": "b"})
+
+    # A failed post must not delete the only live struct.
+    assert adapter.deleted == []
+    assert all(record[1] != "msg-2" for record in engine.recorded)
+
+
+def test_move_delete_failure_still_tracks_the_fresh_struct():
+    adapter = StubAdapter(fail_delete=True)
+    transport, _ = _transport(adapter)
+    engine = ChunkOnlyEngine({"platform": "discord", "chat_id": "42"})
+    clock = [1000.0]
+    notifier = _moving_notifier(engine, transport, clock)
+
+    notifier.process("worker_running", {"run_id": "omo_1", "goal": "g", "agent": "hephaestus", "model": "a"})
+    clock[0] += 6.0
+    notifier.process("worker_running", {"run_id": "omo_1", "goal": "g", "agent": "hephaestus", "model": "b"})
+
+    # The stale copy is left behind (best-effort), but the new struct is live.
+    assert adapter.deleted == [{"chat_id": "42", "message_id": "msg-1"}]
+    assert engine.recorded[-1] == ("omo_1", "msg-2")

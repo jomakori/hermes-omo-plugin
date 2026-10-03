@@ -6,30 +6,53 @@ nothing about Discord, threads or the clock: it takes a plain run-state
 structure and returns the string, which is what makes the format unit-testable
 with no gateway in the loop.
 
-A run state is a list of blocks, one per agent/worker in the run:
+A run state states the goal **once**, in the run heading::
+
+    🏗️ omo · omo_304bf8e5 — shell parity across the fleet · 24 workers
+
+and every worker below it carries a *condensed* label instead of a second copy
+of the goal::
 
     {
-        "agent": "hephaestus",               # the worker owning this block
-        "process": "OKT-161 — shell parity", # run/task goal, truncated ~60 chars
-        "phases": [
-            {"name": "dispatch", "status": "done"},
-            {"name": "run", "status": "current", "run_id": "omo_304bf8e5",
-             "task_id": "t4", "detail": "wiring the nav badge semantics",
-             "phrase": "patching components/shell.rs…"},
-            {"name": "review", "status": "reviewing", "reviewer": "momus",
-             "run_id": "omo_304bf8e5", "task_id": "t14:review"},
+        "run_id": "omo_304bf8e5",
+        "goal": "shell parity across the fleet",
+        "review": True,
+        "workers": [
+            {
+                "label": "OKT-161",                 # condensed, cut on a word boundary
+                "display": "hephaestus · Deep Agent",  # roster AgentSpec.display
+                "process": "OKT-161 — shell parity",   # raw task the label came from
+                "review": True,                        # per-run review flag, read off the payload
+                "activity": "📖 read_file orchestrator/status_message.py",  # live, optional
+                "hop": "claude-sonnet-5 (rate limit)", # chain fallback, optional
+                "phases": [
+                    {"name": "dispatch", "status": "done"},
+                    {"name": "run", "status": "current", "task_id": "t4",
+                     "model": "minimax-m3", "phrase": "patching components/shell.rs…"},
+                    {"name": "review", "status": "reviewing", "reviewer": "momus",
+                     "task_id": "t14:review"},
+                ],
+            },
         ],
     }
 
-Blocks are separated by one blank line. Every block carries the three phase
-rows in order — dispatch, run, review — and the ``review`` row is *folded into
-the producing worker's block*, naming the reviewer and verdict on the row; there
-is never a separate review block. The current (🔁) run row carries the run id,
-the task id and a short detail, and is followed by the indented rotating line.
+Blocks are separated by one blank line. A block carries the three phase rows in
+order — dispatch, run, review — with two deliberate omissions: the dispatch row
+is dropped once it is ``done`` (the run row implies it), and the whole review row
+is dropped when the run's ``review`` flag is false. The ``review`` row is *folded
+into the producing worker's block*; there is never a separate review block. The
+current (🔁) run row names the task and the serving model and is followed by the
+indented line carrying the worker's real tool call (or the canned rotating
+phrase), with a chain fallback named on the same line.
+
+Truncation is always on a word boundary and never appends an ellipsis: the only
+rendered ellipsis is the deliberate ``…N more`` collapse marker, which never
+ends a line by itself.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from orchestrator.status_rotation import ROTATE_INTERVAL_SECONDS
@@ -54,57 +77,154 @@ STATUS_EMOJI: dict[str, str] = {
 _RUNNING = ("current", "running")
 _RUN_CAUSE = ("blocked", "interrupted", "failed", "cancelled")
 
-HEADER_PREFIX = "🏗️ omo:"
+# The run heading appears once per message; worker lines never repeat the goal.
+HEADER_PREFIX = "🏗️ omo"
 DEFAULT_MAX_CHARS = 2000
-DEFAULT_MAX_PROCESS_CHARS = 60
-DEFAULT_MAX_DETAIL_CHARS = 48
+DEFAULT_MAX_GOAL_CHARS = 60
+# A worker's condensed label: tighter once the run fans out wide, so a 24-worker
+# run still fits Discord's cap with every worker's status rows intact.
+DEFAULT_LABEL_CHARS = 44
+COMPACT_LABEL_CHARS = 24
+FANOUT_COMPACT_THRESHOLD = 8
+DEFAULT_MAX_ACTIVITY_CHARS = 48
 DEFAULT_MAX_CAUSE_CHARS = 48
 
-__all__ = [
-    "DEFAULT_MAX_CAUSE_CHARS",
-    "DEFAULT_MAX_CHARS",
-    "DEFAULT_MAX_DETAIL_CHARS",
-    "DEFAULT_MAX_PROCESS_CHARS",
-    "HEADER_PREFIX",
-    "PHASES",
-    "STATUS_EMOJI",
-    "render_block",
-    "render_status",
-]
+# The tool-call line's own glyphs; the tool's emoji is resolved from the host
+# registry at runtime (see :func:`tool_emoji`), never from a hardcoded map.
+ACTIVITY_GLYPH = "↳"
+HOP_GLYPH = "⤵"
 
 # The phase pipeline, in order. Kept here so the renderer and the tracker agree
 # on what a block's rows are.
 PHASES = ("dispatch", "run", "review")
 
+# A ticket id is the best label a task can offer: stable, short, and what the
+# reader already tracks. `OKT-161`, `PROJ-7`, `A1-22`.
+_TICKET = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d{1,5}\b")
+# Otherwise the first clause is the label: cut at an em/en dash, a colon, or a
+# sentence end. A bare hyphen is not a separator (`claude-sonnet-5` is a name).
+_CLAUSE_SPLIT = re.compile(r"\s*(?:—|–|:)\s*|\s+[.?!]\s+")
 
-def _truncate(text: Any, limit: int) -> str:
-    """Bound `text` to `limit` characters, naming the cut with an ellipsis."""
+__all__ = [
+    "ACTIVITY_GLYPH",
+    "COMPACT_LABEL_CHARS",
+    "DEFAULT_LABEL_CHARS",
+    "DEFAULT_MAX_ACTIVITY_CHARS",
+    "DEFAULT_MAX_CAUSE_CHARS",
+    "DEFAULT_MAX_CHARS",
+    "DEFAULT_MAX_GOAL_CHARS",
+    "FANOUT_COMPACT_THRESHOLD",
+    "HEADER_PREFIX",
+    "HOP_GLYPH",
+    "PHASES",
+    "STATUS_EMOJI",
+    "condense_label",
+    "label_limit",
+    "render_activity",
+    "render_block",
+    "render_status",
+    "tool_emoji",
+]
+
+
+def _cut(text: Any, limit: int) -> str:
+    """Bound `text` to `limit` chars on a word boundary, with no ellipsis.
+
+    A rendered line may never *end* in ``…`` (that is reserved for the deliberate
+    ``…N more`` collapse marker), so an over-long value is trimmed to its last
+    whole word rather than dotted out. A single token longer than the limit is
+    sliced — still without an ellipsis.
+    """
     value = str(text or "").strip()
     if limit <= 0 or not value:
         return ""
     if len(value) <= limit:
         return value
-    if limit == 1:
-        return "…"
-    return value[: limit - 1].rstrip() + "…"
+    head = value[:limit]
+    if " " in head:
+        candidate = head.rsplit(" ", 1)[0].rstrip()
+        if candidate:
+            return candidate
+    return head.rstrip()
+
+
+def _first_clause(value: str) -> str:
+    head = _CLAUSE_SPLIT.split(value, maxsplit=1)[0].strip()
+    return head or value
+
+
+def label_limit(fanout: int) -> int:
+    """The condensed-label budget for a run of `fanout` workers."""
+    return COMPACT_LABEL_CHARS if int(fanout or 0) > FANOUT_COMPACT_THRESHOLD else DEFAULT_LABEL_CHARS
+
+
+def condense_label(text: Any, limit: int = DEFAULT_LABEL_CHARS) -> str:
+    """One short label for a worker: its ticket id, else its first clause.
+
+    The goal is already stated once in the run heading, so a worker must not
+    repeat it. Cut on a word boundary — never mid-word, never with an ellipsis.
+    """
+    value = " ".join(str(text or "").split())
+    if not value:
+        return ""
+    ticket = _TICKET.search(value)
+    base = ticket.group(0) if ticket else _first_clause(value)
+    return _cut(base, limit)
+
+
+def tool_emoji(tool_name: Any, *, default: str = "⚡", resolver: Any = None) -> str:
+    """The emoji the host registry holds for `tool_name`, or `default`.
+
+    Resolved at runtime from the host's own tool registry
+    (``tools.registry.registry.get_emoji``) so a plugin never keeps a second,
+    drifting map of tool emojis. A host without the registry (CLI, unit tests)
+    or a registry that raises degrades to `default`.
+    """
+    name = str(tool_name or "").strip()
+    if not name:
+        return default
+    if resolver is not None:
+        try:
+            return str(resolver(name, default) or default)
+        except Exception:
+            return default
+    try:
+        from tools.registry import registry  # noqa: PLC0415 - host-only, optional
+
+        return str(registry.get_emoji(name, default) or default)
+    except Exception:
+        return default
+
+
+def render_activity(
+    tool_name: Any,
+    target: Any = "",
+    *,
+    emoji_resolver: Any = None,
+    limit: int = DEFAULT_MAX_ACTIVITY_CHARS,
+) -> str:
+    """`{emoji} {tool} {target}`, bounded to `limit` on a word boundary."""
+    name = str(tool_name or "").strip()
+    if not name:
+        return ""
+    emoji = tool_emoji(name, resolver=emoji_resolver)
+    return _cut(_join(emoji, name, target, sep=" "), limit)
 
 
 def _join(*parts: Any, sep: str = " · ") -> str:
     return sep.join(str(p).strip() for p in parts if str(p or "").strip())
 
 
-def _run_extra(status: str, phase: dict[str, Any]) -> str:
-    """The text after the run emoji: refs+detail while running, else cause/elapsed."""
+def _run_extra(status: str, phase: dict[str, Any], model: str) -> str:
+    """The text after the run emoji: refs+model while running, else cause/elapsed."""
     if status in _RUNNING:
-        refs = _join(phase.get("run_id"), phase.get("task_id"))
-        detail = _truncate(phase.get("detail"), DEFAULT_MAX_DETAIL_CHARS)
-        if refs and detail:
-            return f"{refs} — {detail}"
-        return refs or detail
+        refs = _join(phase.get("task_id") or phase.get("run_id"))
+        serving = str(phase.get("model") or model or "").strip()
+        return _join(refs, serving)
     if status == "done":
-        return _truncate(phase.get("duration"), DEFAULT_MAX_CAUSE_CHARS)
+        return _cut(phase.get("duration"), DEFAULT_MAX_CAUSE_CHARS)
     if status in _RUN_CAUSE:
-        return _truncate(phase.get("cause") or phase.get("detail"), DEFAULT_MAX_CAUSE_CHARS)
+        return _cut(phase.get("cause") or phase.get("detail"), DEFAULT_MAX_CAUSE_CHARS)
     return ""
 
 
@@ -125,55 +245,90 @@ def _review_extra(status: str, phase: dict[str, Any]) -> str:
     return ""
 
 
-def _row_extra(name: str, status: str, phase: dict[str, Any]) -> str:
+def _row_extra(name: str, status: str, phase: dict[str, Any], model: str) -> str:
     if name == "run":
-        return _run_extra(status, phase)
+        return _run_extra(status, phase, model)
     if name == "review":
         return _review_extra(status, phase)
+    if name == "dispatch" and status in _RUN_CAUSE:
+        return _cut(phase.get("cause") or phase.get("detail"), DEFAULT_MAX_CAUSE_CHARS)
     return ""
 
 
-def _render_row(phase: dict[str, Any]) -> str:
+def _render_row(phase: dict[str, Any], model: str) -> str:
     name = str(phase.get("name") or "?").strip().lower() or "?"
     status = str(phase.get("status") or "pending").strip().lower()
     emoji = STATUS_EMOJI.get(status, STATUS_EMOJI["pending"])
     row = f"- {name} {emoji}"
-    extra = _row_extra(name, status, phase)
+    extra = _row_extra(name, status, phase, model)
     if extra:
         row = f"{row} {extra}"
     return row
 
 
-def _cycling_line(phase: dict[str, Any]) -> str:
-    """The indented rotating line, present only under a running run row."""
+def _activity_line(phase: dict[str, Any], block: dict[str, Any]) -> str:
+    """The indented line under a running run row: the live call, or the canned phrase.
+
+    The worker's own tool call wins when one is observable; otherwise the canned
+    rotating phrase keeps the line alive (it is never blank). A chain fallback is
+    named on the same line.
+    """
     name = str(phase.get("name") or "").strip().lower()
     status = str(phase.get("status") or "").strip().lower()
     if name != "run" or status not in _RUNNING:
         return ""
-    phrase = str(phase.get("phrase") or "").strip()
-    if not phrase:
-        return ""
-    seconds = int(phase.get("rotate_seconds") or ROTATE_INTERVAL_SECONDS)
-    return f"  ↳ cycling: {phrase} ({seconds}s)"
+    activity = str(block.get("activity") or "").strip()
+    if activity:
+        line = f"  {ACTIVITY_GLYPH} {activity}"
+    else:
+        phrase = str(phase.get("phrase") or "").strip()
+        if not phrase:
+            return ""
+        seconds = int(phase.get("rotate_seconds") or ROTATE_INTERVAL_SECONDS)
+        line = f"  {ACTIVITY_GLYPH} cycling: {phrase} ({seconds}s)"
+    hop = str(block.get("hop") or "").strip()
+    if hop:
+        line = f"{line} · {HOP_GLYPH} {hop}"
+    return line
+
+
+def _row_visible(name: str, status: str, block: dict[str, Any]) -> bool:
+    """Whether a phase row earns its line at all.
+
+    Dispatch is implied by the run row once it is done, and a run with review
+    switched off must render no review row at all (the flag is read off the
+    payload, never inferred).
+    """
+    if name == "dispatch" and status == "done":
+        return False
+    if name == "review" and not bool(block.get("review", True)):
+        return False
+    return True
 
 
 def render_block(block: dict[str, Any], *, row_budget: int | None = None) -> str:
     """Render one worker block. `row_budget` caps visible phase rows (>0 hidden)."""
-    agent = str(block.get("agent") or "?").strip() or "?"
-    process = _truncate(block.get("process") or block.get("goal"), DEFAULT_MAX_PROCESS_CHARS)
-    header = f"{HEADER_PREFIX} {agent}"
-    if process:
-        header = f"{header}: {process}"
+    limit = int(block.get("label_limit") or DEFAULT_LABEL_CHARS)
+    label = str(block.get("label") or "").strip()
+    if not label:
+        label = condense_label(block.get("process") or block.get("goal"), limit)
+    display = str(block.get("display") or "").strip() or str(block.get("agent") or "?").strip() or "?"
+    model = str(block.get("model") or "").strip()
+    header = _join(label, display) or "?"
 
     phases = [p for p in (block.get("phases") or []) if isinstance(p, dict)]
     visible = phases if row_budget is None else phases[: max(0, row_budget)]
 
     lines = [header]
     for phase in visible:
-        lines.append(_render_row(phase))
-        cycling = _cycling_line(phase)
-        if cycling:
-            lines.append(cycling)
+        name = str(phase.get("name") or "?").strip().lower() or "?"
+        status = str(phase.get("status") or "pending").strip().lower()
+        if not _row_visible(name, status, block):
+            continue
+        lines.append(_render_row(phase, model))
+        activity = _activity_line(phase, block)
+        if activity:
+            lines.append(activity)
 
     hidden = len(phases) - len(visible)
     if hidden > 0:
@@ -181,30 +336,53 @@ def render_block(block: dict[str, Any], *, row_budget: int | None = None) -> str
     return "\n".join(lines)
 
 
-def render_status(blocks: Any, *, max_chars: int = DEFAULT_MAX_CHARS) -> str:
-    """Render every block, collapsing rows to stay under `max_chars` (Discord)."""
-    clean = [b for b in (blocks or []) if isinstance(b, dict)]
-    text = "\n\n".join(render_block(b) for b in clean)
+def _heading(run: dict[str, Any]) -> str:
+    run_id = str(run.get("run_id") or "").strip()
+    goal = _cut(run.get("goal"), DEFAULT_MAX_GOAL_CHARS)
+    if not run_id and not goal:
+        return ""
+    workers = [w for w in (run.get("workers") or []) if isinstance(w, dict)]
+    head = HEADER_PREFIX
+    if run_id:
+        head = f"{head} · {run_id}"
+    if goal:
+        head = f"{head} — {goal}"
+    if len(workers) > 1:
+        head = f"{head} · {len(workers)} workers"
+    return head
+
+
+def render_status(run: Any, *, max_chars: int = DEFAULT_MAX_CHARS) -> str:
+    """Render the run heading plus every worker block, collapsing to fit Discord."""
+    run = run if isinstance(run, dict) else {}
+    workers = [b for b in (run.get("workers") or []) if isinstance(b, dict)]
+    heading = _heading(run)
+    body = "\n\n".join(render_block(b) for b in workers)
+    if body:
+        text = f"{heading}\n\n{body}" if heading else body
+    else:
+        text = heading
     if len(text) <= max_chars:
         return text
-    return _collapse(clean, max_chars)
+    return _collapse(run, workers, max_chars)
 
 
-def _collapse(blocks: list[dict[str, Any]], max_chars: int) -> str:
-    """Shrink the widest block's visible rows until the message fits.
+def _collapse(run: dict[str, Any], blocks: list[dict[str, Any]], max_chars: int) -> str:
+    """Shrink visible rows — then whole blocks — until the message fits.
 
     Rows are dropped before whole blocks: a truncated phase list still names the
-    agent and its outcome, while a dropped block hides a worker entirely. Only
-    when even headers do not fit are trailing blocks folded into a count, and a
-    final hard truncation guarantees Discord never receives an oversized body.
+    worker and its outcome, while a dropped block hides a worker entirely. Only
+    when even headers do not fit are trailing blocks folded into a count. Nothing
+    is ever dot-dotted out: the sole ellipsis is the ``…N more`` marker.
     """
     count = len(blocks)
+    heading = _heading(run)
     if count == 0:
-        return ""
-
+        return _cut(run.get("goal"), max_chars)
     budgets = [len([p for p in (b.get("phases") or []) if isinstance(p, dict)]) for b in blocks]
     while True:
-        text = "\n\n".join(render_block(blocks[i], row_budget=budgets[i]) for i in range(count))
+        parts = [render_block(blocks[i], row_budget=budgets[i]) for i in range(count)]
+        text = _compose(heading, parts)
         if len(text) <= max_chars:
             return text
         widest = max(range(count), key=lambda i: budgets[i])
@@ -218,14 +396,18 @@ def _collapse(blocks: list[dict[str, Any]], max_chars: int) -> str:
         hidden = count - visible
         if hidden:
             parts.append(f"…{hidden} more agents")
-        text = "\n\n".join(parts)
+        text = _compose(heading, parts)
         if len(text) <= max_chars:
             return text
         visible -= 1
 
-    # Headers alone still overflow (absurdly long names): hard-truncate rather
-    # than hand Discord a message it will reject.
-    text = "\n\n".join(f"{HEADER_PREFIX} …" for _ in range(count))
-    if len(text) > max_chars:
-        return text[: max(1, max_chars - 1)] + "…"
-    return text
+    # Headers alone still overflow (absurdly long labels): trim the heading and
+    # return it rather than hand Discord an oversized body.
+    return _cut(heading, max_chars)
+
+
+def _compose(heading: str, parts: list[str]) -> str:
+    body = "\n\n".join(parts)
+    if body:
+        return f"{heading}\n\n{body}" if heading else body
+    return heading

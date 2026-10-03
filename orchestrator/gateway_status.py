@@ -189,6 +189,26 @@ class GatewayStatusTransport:
         logger.debug("OMO status edit declined for %s: %s", run_key, error)
         return False
 
+    async def delete(self, run_key: str, message_id: str) -> bool:
+        """Delete the previous struct after a move; False when it could not be.
+
+        The moving struct posts the fresh copy first and deletes the previous one
+        second, so a failed delete only leaves a stale copy behind — never a lost
+        live message. A platform whose adapter has no ``delete_message`` (the base
+        class returns False) simply keeps both copies.
+        """
+        adapter = self._adapter()
+        if adapter is None or not message_id:
+            return False
+        delete_message: Any = getattr(adapter, "delete_message", None)
+        if not callable(delete_message):
+            return False
+        try:
+            return bool(await delete_message(self._target, str(message_id)))
+        except Exception as exc:
+            logger.debug("OMO status delete failed for %s: %s", run_key, exc)
+            return False
+
 
 def _looks_gone(error: Any) -> bool:
     text = str(error or "").lower()

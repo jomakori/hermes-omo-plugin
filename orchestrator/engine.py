@@ -8,7 +8,12 @@ from typing import Any
 
 from orchestrator import session
 from orchestrator.boundary import claim_boundary
-from orchestrator.chains import classify_failure_reason, client_disconnected, status_from_message
+from orchestrator.chains import (
+    HOP_REASON_SUCCESS,
+    classify_failure_reason,
+    client_disconnected,
+    status_from_message,
+)
 from orchestrator.guards import GuardError, check_delegation
 from orchestrator.models import (
     CANCELLED,
@@ -279,7 +284,13 @@ class OmoEngine:
         self._status = notifier
 
     def _worker_event(self, run: Run, worker: Worker) -> dict[str, Any]:
-        """The payload every worker progress event carries."""
+        """The payload every worker progress event carries.
+
+        Beyond the ids, this is where the live message learns everything it shows
+        for a worker: the roster display (name · role), the serving model, the
+        worker's error (so a stopped row names its reason), the chain hop it fell
+        back to, and the child session its live tool call can be read from.
+        """
         return {
             "run_id": run.run_id,
             "goal": run.goal,
@@ -288,7 +299,56 @@ class OmoEngine:
             "task": worker.task,
             "run_ref": worker.task_id or run.run_id,
             "status": worker.status,
+            "display": self._display(worker.agent_name),
+            "model": worker.model or "",
+            "error": worker.error or "",
+            "hop": self._hop_note(worker),
+            "activity_session": worker.activity_session or "",
         }
+
+    @staticmethod
+    def _display(agent_name: str) -> str:
+        """The roster line for an agent (``hephaestus · Deep Agent``)."""
+        spec = AGENTS.get(agent_name)
+        return spec.display if spec is not None else str(agent_name or "")
+
+    @staticmethod
+    def _hop_note(worker: Worker) -> str:
+        """The last *failed* hop of the chain walk, as ``model (reason)``.
+
+        Empty when the primary served the work. Only a hop that was actually
+        dropped for a non-success reason is named — a success entry says nothing
+        the reader needs.
+        """
+        for hop in reversed(worker.hop_history):
+            if not isinstance(hop, dict):
+                continue
+            reason = str(hop.get("reason") or "").strip()
+            if not reason or reason == HOP_REASON_SUCCESS:
+                continue
+            model = str(hop.get("model") or "").strip()
+            human = reason.replace("_", " ")
+            return f"{model} ({human})" if model else f"({human})"
+        return ""
+
+    def _capture_activity_session(self, worker: Worker) -> None:
+        """Pin the child session whose live tool call the status line reads.
+
+        The launch handle names no child session (see ``orchestrator.worker_activity``),
+        so the profile's newest session at launch is adopted. Done once, only when a
+        live notifier is attached, and never fatal: no session just means the canned
+        phrase stands.
+        """
+        if self._status is None or worker.activity_session:
+            return
+        try:
+            from orchestrator import worker_activity  # noqa: PLC0415 - optional
+
+            worker.activity_session = (
+                worker_activity.session_at_launch(worker.agent_name, self._config("activity_profiles_dir", None)) or ""
+            )
+        except Exception:
+            worker.activity_session = ""
 
     def _progress(self, event: str, payload: dict[str, Any]) -> None:
         """Announce one real transition.
@@ -364,12 +424,14 @@ class OmoEngine:
             try:
                 handle = service.launch(request)
                 worker.handle = handle
+                self._capture_activity_session(worker)
                 if worker.cancel_requested:
                     try:
                         service.cancel(handle, reason="cancelled before start")
                     except Exception:
                         pass
                     worker.status = CANCELLED
+                    worker.error = worker.error or "cancelled before start"
                     worker.finished_at = time.time()
                     self._progress("worker_cancelled", self._worker_event(run, worker))
                     return self._outcome(run, worker)
@@ -411,11 +473,13 @@ class OmoEngine:
         if worker.cancel_requested or client_disconnected(last_error):
             # Cancelled work is not a stage failure: it says nothing about whether the
             # agent can do the work, so it must not consume the stage's attempt budget.
+            # The row still names a reason rather than echoing the task text.
             worker.status = CANCELLED
+            worker.error = last_error or "cancelled"
         else:
             worker.status = FAILED
+            worker.error = last_error
             self._record_stage_failure(worker)
-        worker.error = last_error
         # The walk is over: keep which hops were tried and why they were dropped,
         # whatever the terminal state (cancelled hops are history too).
         worker.hop_history = list(state.hop_history)
@@ -584,6 +648,7 @@ class OmoEngine:
     async def _run_worker(self, run: Run, worker: Worker, request: Any) -> None:
         if worker.cancel_requested:
             worker.status = CANCELLED
+            worker.error = worker.error or "cancelled"
             self._progress("worker_cancelled", self._worker_event(run, worker))
             self._persist()
             return
