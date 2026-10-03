@@ -385,7 +385,12 @@ def test_agent_role_rides_the_worker_line():
     assert "add live status · hephaestus · Deep Agent" in action.text
 
 
-# ── T7 the struct moves: post fresh, drop the previous, terminal stops ─────────
+# ── T7 the struct moves only as an opt-in: post fresh, drop the previous ───────
+
+# An explicit positive cadence for the move tests. The tracker's default is now
+# 0.0 (edit in place), so the move path has to be opted into here rather than
+# inherited from DEFAULT_MOVE_INTERVAL.
+MOVE_EVERY = 5.0
 
 
 def _two_worker_graph():
@@ -400,12 +405,30 @@ def _two_worker_graph():
     }
 
 
-def test_move_posts_a_fresh_struct_once_the_cadence_elapses():
+def test_default_edits_in_place_and_never_moves_the_struct():
+    """The shipped default re-posts nothing: one message, edited in place.
+
+    A changed render well past both the edit throttle and any plausible move
+    cadence is still an ``edit`` of the message the run already owns — never a
+    ``move`` or a second ``post``.
+    """
     tracker, clock = _tracker()
+    tracker.apply("worker_running", _created())
+    tracker.note_message_id("omo_1", "1")
+    clock.advance(DEFAULT_MIN_EDIT_INTERVAL + 3600.0)
+    action = tracker.apply("worker_running", {**_created(), "model": "minimax-m3"})
+    assert action.kind == "edit"
+    assert action.message_id == "1"  # the one live message is kept
+    assert DEFAULT_MOVE_INTERVAL == 0.0
+    assert tracker.move_interval == 0.0
+
+
+def test_move_posts_a_fresh_struct_once_the_cadence_elapses():
+    tracker, clock = _tracker(move_interval=MOVE_EVERY)
     tracker.apply("run_created", _two_worker_graph())
     tracker.note_message_id("omo_g", "1")
-    assert tracker.move_interval == DEFAULT_MOVE_INTERVAL
-    clock.advance(DEFAULT_MOVE_INTERVAL + 0.1)
+    assert tracker.move_interval == MOVE_EVERY
+    clock.advance(MOVE_EVERY + 0.1)
     action = tracker.apply(
         "task_started", {"run_id": "omo_g", "agent": "hephaestus", "task_id": "t1", "task": "write the code"}
     )
@@ -414,7 +437,7 @@ def test_move_posts_a_fresh_struct_once_the_cadence_elapses():
 
 
 def test_change_inside_the_move_interval_edits_in_place():
-    tracker, clock = _tracker()
+    tracker, clock = _tracker(move_interval=MOVE_EVERY)
     tracker.apply("run_created", _two_worker_graph())
     tracker.note_message_id("omo_g", "1")
     clock.advance(DEFAULT_MIN_EDIT_INTERVAL + 0.1)  # past the edit throttle, before the move cadence
@@ -426,10 +449,10 @@ def test_change_inside_the_move_interval_edits_in_place():
 
 
 def test_terminal_state_stops_moving_and_the_final_struct_stays():
-    tracker, clock = _tracker()
+    tracker, clock = _tracker(move_interval=MOVE_EVERY)
     tracker.apply("worker_running", _created())
     tracker.note_message_id("omo_1", "1")
-    clock.advance(DEFAULT_MOVE_INTERVAL + 30)
+    clock.advance(MOVE_EVERY + 30)
     action = tracker.apply("worker_succeeded", _created())
     assert action.kind == "edit"  # terminal: edit, never move
     clock.advance(10_000)
@@ -437,11 +460,11 @@ def test_terminal_state_stops_moving_and_the_final_struct_stays():
 
 
 def test_a_gone_stored_id_posts_fresh_never_a_dead_edit_loop():
-    tracker, clock = _tracker()
+    tracker, clock = _tracker(move_interval=MOVE_EVERY)
     tracker.adopt("omo_1", "stale")
     assert tracker.apply("worker_running", _created()).kind == "edit"
     # The edit found the stored id gone; the notifier clears it.
     tracker.note_message_id("omo_1", None)
-    clock.advance(DEFAULT_MOVE_INTERVAL + 1)
+    clock.advance(MOVE_EVERY + 1)
     action = tracker.apply("worker_succeeded", _created())
     assert action.kind == "post"

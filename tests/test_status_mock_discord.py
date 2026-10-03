@@ -40,7 +40,6 @@ from orchestrator.gateway_status import GatewayStatusTransport  # noqa: E402
 from orchestrator.status_message import DEFAULT_MAX_CHARS  # noqa: E402
 from orchestrator.status_notifier import StatusNotifier  # noqa: E402
 from orchestrator.status_tracker import (  # noqa: E402
-    DEFAULT_MOVE_INTERVAL,
     DEFAULT_PHRASE_INTERVAL,
     StatusTracker,
 )
@@ -50,6 +49,9 @@ from roster import AGENTS  # noqa: E402
 GOAL = "shell parity across the fleet"
 PARENT_CHAT = "42"
 THREAD = "t7"
+# The move path is opt-in now (the tracker default is 0.0), so the moving-struct
+# test drives an explicit positive cadence instead of the default.
+MOVE_INTERVAL = 5.0
 _UNSET = object()
 
 
@@ -526,14 +528,14 @@ def test_review_problems_then_clean():
 
 
 def test_moving_struct_posts_below_then_deletes_the_previous():
-    h = Harness(clock=FakeClock(), min_edit_interval=0.0)
+    h = Harness(clock=FakeClock(), min_edit_interval=0.0, move_interval=MOVE_INTERVAL)
     h.emit(
         "worker_running",
         harness_payload("omo_1", "hephaestus", "omo_1", "fix the bug", model="minimax-m3", goal="fix the bug"),
     )
     first_id = h.adapter.ops_of("post")[0]["message_id"]
 
-    h.clock.advance(DEFAULT_MOVE_INTERVAL + 0.1)
+    h.clock.advance(MOVE_INTERVAL + 0.1)
     moved = h.emit(
         "worker_running",
         harness_payload("omo_1", "hephaestus", "omo_1", "fix the bug", model="glm-5.3", goal="fix the bug"),
@@ -549,7 +551,7 @@ def test_moving_struct_posts_below_then_deletes_the_previous():
     assert h.engine.recorded[-1] == ("omo_1", posts[1]["message_id"])
 
     # A terminal state edits in place: it never moves the final struct away.
-    h.clock.advance(DEFAULT_MOVE_INTERVAL + 30)
+    h.clock.advance(MOVE_INTERVAL + 30)
     h.emit(
         "worker_succeeded",
         harness_payload("omo_1", "hephaestus", "omo_1", "fix the bug", model="glm-5.3", goal="fix the bug"),

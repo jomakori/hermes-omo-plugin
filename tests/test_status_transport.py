@@ -17,6 +17,10 @@ from orchestrator.gateway_status import GatewayStatusTransport
 from orchestrator.status_notifier import StatusNotifier
 from orchestrator.status_tracker import StatusTracker
 
+# The move path is opt-in (the tracker default is 0.0), so the moving-struct tests
+# drive an explicit positive cadence rather than the default.
+MOVE_INTERVAL = 5.0
+
 
 @dataclasses.dataclass
 class SendResult:
@@ -303,8 +307,9 @@ def test_delete_without_an_adapter_is_a_silent_false():
 
 
 def _moving_notifier(engine, transport, clock):
-    """A notifier whose tracker moves once the 5s cadence has elapsed."""
-    tracker = StatusTracker(clock=lambda: clock[0], min_edit_interval=0.0, move_interval=5.0)
+    """A notifier whose tracker moves once the opt-in move cadence has elapsed."""
+    tracker = StatusTracker(clock=lambda: clock[0], min_edit_interval=0.0, move_interval=MOVE_INTERVAL)
+    assert tracker.move_interval == MOVE_INTERVAL
     return StatusNotifier(None, engine=engine, tracker=tracker, transport_factory=lambda route: transport)
 
 
