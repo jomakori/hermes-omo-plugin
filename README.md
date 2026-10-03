@@ -53,6 +53,7 @@ plugins:
         max_parallel: 4          # tasks in flight for one graph dispatch
         max_review_cycles: 1     # reviewer passes per task; 0 disables review
         status_message_enabled: true     # one live status message per run
+        status_pin_message: true         # pin that message while the run is live (needs Manage Messages)
         status_edit_interval: 2.0        # seconds between edits (throttle floor)
         status_move_interval: 0.0        # struct moves (post fresh + delete old); 0 = edit in place, never move
         status_phrase_interval: 3.0      # seconds between rotating phrase lines / activity refresh
@@ -195,6 +196,42 @@ message; a stored id that is **gone** falls back to posting fresh once, never to
 dead edit loop. A move's delete is best-effort — a platform without a deletion API,
 or a failed delete, leaves the previous copy behind (the new id is tracked either
 way).
+
+**Pinning.** With `status_pin_message` on (the default), the struct is **pinned**
+as soon as it is posted, so it stays at the top of the channel instead of being
+buried while the run is live, and is **unpinned exactly once** — the moment the
+run reaches a terminal state in which **every worker succeeded**. Any other
+outcome leaves it pinned: a run that fails, is blocked, is cancelled, is
+interrupted, or is simply still running stays pinned, as does a fan-out where one
+worker succeeded and another did not. A move pins the fresh copy and releases the
+previous one. The pinned message id is persisted alongside the message id on the
+run record (`status_pinned_id`), so an unpin — or the cap eviction below — still
+knows which pin is ours after a restart. Idempotence is a latch in the tracker:
+once released, a late tick or a duplicated terminal event cannot release it again.
+
+Pinning is best-effort, like the rest of the status surface, and has three
+limitations worth stating plainly:
+
+- **Manage Messages is required.** Pinning is a permission, and the bot needs
+  **Manage Messages** in the channel (or the thread's parent) to set and clear a
+  pin. Without it the platform refuses the pin and it is logged as a warning
+  (403 / 50013) and skipped — the status message still posts and edits, it just
+  does not stay pinned. Grant the permission, then verify a live pin in Discord;
+  nothing here can prove it against the real API.
+- **Discord only.** Reaching the message goes through `channel.get_partial_message(id)`
+  and the `pin`/`unpin` calls of the Discord client. A platform without that
+  capability, or a transport without a reachable client, degrades to a logged
+  no-op — never an error that could fail the run.
+- **A private coupling.** The adapter exposes no public client, so the transport
+  reaches the bot through its private `_client` attribute (a public accessor is
+  preferred when one exists). If the host renames `_client`, pinning **fails
+  safe**: it logs a debug line and becomes a no-op, while posting and editing keep
+  working.
+
+The pin cap (Discord's 50 pins per channel, error `30001`) is handled without
+touching anyone else's pins: on a cap refusal, the **oldest pin this plugin owns**
+(read off the run records) is released and the pin is retried **exactly once**. If
+there is no pin of ours to release, the pin is simply not taken.
 
 **Keeping it alive.** The renderer is pure (`orchestrator/status_message.py`,
 run state → exact string) and the throttle/dedupe/move rules are a pure state
