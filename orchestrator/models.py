@@ -48,6 +48,41 @@ def as_optional_str(value: Any) -> str | None:
     return text or None
 
 
+# The pieces of a worker's result the read path surfaces, named to match the
+# claim_boundary field kinds (see ``orchestrator.boundary``): the worker's own
+# summary and structured payload, plus the host-observed terminal state and usage.
+_RESULT_FIELDS = (
+    "summary",
+    "structured_payload",
+    "usage_metadata",
+    "tool_execution_summary",
+    "terminal_state",
+    "error_message",
+)
+
+
+def result_payload(result: Any) -> Any:
+    """The readable form of a finished worker's result for a status/tree payload.
+
+    The registry holds the host's result object as-is; a caller polling a
+    background run needs its content, not an opaque repr. A dict result passes
+    through untouched; a host object is narrowed to the fields a claim_boundary
+    can name, so a lost result is never mistaken for a run that produced nothing.
+    """
+    if result is None:
+        return None
+    if isinstance(result, dict):
+        return result
+    fields: dict[str, Any] = {}
+    for name in _RESULT_FIELDS:
+        value = getattr(result, name, None)
+        if value is None:
+            continue
+        # An enum (e.g. a terminal state) renders as its name, not ``<Enum.x: 1>``.
+        fields[name] = getattr(value, "name", value)
+    return fields or {"value": str(result)}
+
+
 @dataclass
 class Worker:
     run_id: str
@@ -85,6 +120,11 @@ class Worker:
         }
         if self.task_id:
             row["task_id"] = self.task_id
+        # The read path surfaces the result a finished worker produced, so a caller
+        # polling a background run can read it back. It is deliberately not in
+        # `to_dict`: the durable record survives a restart, a result object does not.
+        if self.result is not None:
+            row["result"] = result_payload(self.result)
         if self.depends_on:
             row["depends_on"] = list(self.depends_on)
         if self.parent_id:
