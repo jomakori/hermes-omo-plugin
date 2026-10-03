@@ -54,7 +54,7 @@ plugins:
         max_review_cycles: 1     # reviewer passes per task; 0 disables review
         status_message_enabled: true     # one live status message per run
         status_edit_interval: 2.0        # seconds between edits (throttle floor)
-        status_move_interval: 5.0        # seconds between struct moves (post fresh + delete old)
+        status_move_interval: 0.0        # struct moves (post fresh + delete old); 0 = edit in place, never move
         status_phrase_interval: 3.0      # seconds between rotating phrase lines / activity refresh
         # activity_profiles_dir: /data/profiles   # optional; defaults to <hermes home>/profiles
         enabled_agents: []       # empty = the whole roster; list names to restrict it
@@ -111,12 +111,14 @@ ran.
 ## Live status message
 
 Every run owns **one** live struct in the conversation that dispatched it — one
-per `run_id`, never a second. The struct **moves**: while the run is active it is
-re-posted below the newest message and the previous copy deleted (so it follows
-the conversation instead of being buried by it), with in-place edits keeping it
-current between moves. A graph run with four workers still owns a single struct;
-each worker is one condensed block inside it. So `status_message_enabled: false`
-turns the whole surface off.
+per `run_id`, never a second. It is **edited in place**: posted once and then
+updated as the run progresses, so the one message stays current. The struct only
+**moves** when `status_move_interval > 0` (it defaults to `0`, which disables
+moving): then a changed render is re-posted below the newest message and the
+previous copy deleted, so it follows the conversation instead of being buried by
+it. A graph run with four workers still owns a single struct; each worker is one
+condensed block inside it. So `status_message_enabled: false` turns the whole
+surface off.
 
 ```
 🏗️ omo · omo_304bf8e5 — shell parity across the fleet · 3 workers
@@ -180,24 +182,26 @@ is capped at Discord's 2000 characters: long block lists collapse with `…N mor
 and only if even the headers overflow are trailing blocks folded into `…N more
 agents`.
 
-**Delivery.** The struct is posted on the run's first transition. While the run is
-active it **moves** on `status_move_interval` (default 5s, gentler than the 2s
-edit throttle): a fresh copy is posted below the newest message, the previous copy
-is then deleted, and the new id is persisted — in that order, so a failed post
-leaves the previous struct in place rather than losing the only live one. Between
-moves, a changed render is edited in place. On a **terminal** state the struct
-stops moving: the final render is an edit, so the last struct stays exactly where
-it is. The id is persisted on the run record (`state_path`), so a gateway restart
-keeps the same message; a stored id that is **gone** falls back to posting fresh
-once, never to a dead edit loop. A move's delete is best-effort — a platform
-without a deletion API, or a failed delete, leaves the previous copy behind (the
-new id is tracked either way).
+**Delivery.** The struct is posted on the run's first transition and then
+**edited in place**, so one message serves the whole run. Moving is opt-in: with
+`status_move_interval` above `0` (default `0`, off), once that cadence elapses a
+changed render posts a fresh copy below the newest message, deletes the previous
+copy, and persists the new id — in that order, so a failed post leaves the
+previous struct in place rather than losing the only live one; between moves a
+changed render is edited in place. On a **terminal** state the struct never moves:
+the final render is an edit, so the last struct stays exactly where it is. The id
+is persisted on the run record (`state_path`), so a gateway restart keeps the same
+message; a stored id that is **gone** falls back to posting fresh once, never to a
+dead edit loop. A move's delete is best-effort — a platform without a deletion API,
+or a failed delete, leaves the previous copy behind (the new id is tracked either
+way).
 
 **Keeping it alive.** The renderer is pure (`orchestrator/status_message.py`,
 run state → exact string) and the throttle/dedupe/move rules are a pure state
 machine (`orchestrator/status_tracker.py`, no Discord, no clock — both injected):
 
-- the first render posts; later changed renders edit, or move past the cadence;
+- the first render posts; later changed renders edit in place, or — only with
+  `status_move_interval > 0` — move past that cadence instead;
 - a render whose text is unchanged is skipped entirely (no-op dedupe);
 - otherwise edits are throttled to at least `status_edit_interval` (default 2s);
 - a throttled change is remembered and flushed on the next tick, so a fast burst

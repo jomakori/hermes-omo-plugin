@@ -15,9 +15,10 @@ Rules encoded here:
   otherwise throttled to at least ``min_edit_interval`` seconds apart;
 * a throttled update is remembered as *pending* and flushed on the next tick, so
   a fast burst of transitions never loses the last state;
-* the live struct *moves*: once per ``move_interval`` a changed render is posted
-  fresh below the newest message, the previous one deleted, and the new id kept.
-  Inside that cadence the current struct is edited in place so it stays fresh;
+* the current struct is edited in place — a positive ``move_interval`` opts into
+  the moving struct: once per interval a changed render is posted fresh below the
+  newest message, the previous one deleted, and the new id kept. ``0`` (the
+  default) never moves;
 * a terminal state stops the moving — it forces one final in-place edit and the
   final struct stays where it is;
 * the running phase carries the worker's real tool call (``{emoji} {tool}
@@ -49,8 +50,11 @@ from roster import AGENTS
 DEFAULT_MIN_EDIT_INTERVAL = 2.0
 # Kept as the phrase-timer default; the interval itself lives with the phrases.
 DEFAULT_PHRASE_INTERVAL = ROTATE_INTERVAL_SECONDS
-# The live struct moves on its own, gentler cadence than the edit throttle.
-DEFAULT_MOVE_INTERVAL = 5.0
+# 0 is the edit-in-place default: the one message is updated in place for the
+# whole run and never re-posted. A positive value — or the host setting
+# ``status_move_interval`` — re-enables the moving struct (post a fresh copy on
+# that cadence, then delete the previous one).
+DEFAULT_MOVE_INTERVAL = 0.0
 
 # Run-phase statuses that mean "this worker is finished".
 _SETTLED_RUN = ("done", "failed", "cancelled", "blocked", "interrupted")
@@ -66,8 +70,9 @@ class Action:
     """A delivery instruction for the notifier.
 
     ``post`` sends a fresh message; ``edit`` updates ``message_id`` in place;
-    ``move`` sends a fresh message and then deletes ``message_id`` (the previous
-    struct), keeping exactly the newest one live.
+    ``move`` is the opt-in alternative to an edit (``move_interval > 0``): it
+    sends a fresh message and then deletes ``message_id`` (the previous struct),
+    keeping exactly the newest one live.
     """
 
     kind: str  # "post" | "edit" | "move"
