@@ -386,6 +386,38 @@ class OmoEngine:
         run.status_message_id = message_id
         self._persist()
 
+    def note_status_pin(self, run_id: str, pinned_id: str | None) -> None:
+        """Record the run's pinned status message id (or clear it)."""
+        run = self.runs.get(run_id)
+        if run is None:
+            return
+        run.status_pinned_id = str(pinned_id) if pinned_id else None
+        self._persist()
+
+    def clear_status_pin(self, run_id: str, pinned_id: str | None) -> None:
+        """Forget a run's pin only when the record still names that exact message.
+
+        A move pins the fresh struct and releases the previous one; without this
+        guard the release would clear the fresh pin by accident.
+        """
+        run = self.runs.get(run_id)
+        if run is None or not pinned_id or run.status_pinned_id != str(pinned_id):
+            return
+        run.status_pinned_id = None
+        self._persist()
+
+    def oldest_status_pin(self, exclude_run_id: str | None = None) -> tuple[str, str] | None:
+        """The oldest pin this registry owns, for the pin-cap eviction.
+
+        Only runs that recorded a pin are considered, and the current run is
+        excluded, so the eviction never touches a pin we do not own.
+        """
+        candidates = [run for run in self.runs.values() if run.status_pinned_id and run.run_id != exclude_run_id]
+        if not candidates:
+            return None
+        oldest = min(candidates, key=lambda run: run.created_at)
+        return oldest.run_id, str(oldest.status_pinned_id)
+
     def _request(
         self, *, goal: str, context: str | None, spec: Any, model: str | None, toolsets: tuple[str, ...] | None
     ) -> Any:

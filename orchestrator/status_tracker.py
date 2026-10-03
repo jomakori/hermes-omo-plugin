@@ -55,6 +55,10 @@ DEFAULT_PHRASE_INTERVAL = ROTATE_INTERVAL_SECONDS
 # ``status_move_interval`` — re-enables the moving struct (post a fresh copy on
 # that cadence, then delete the previous one).
 DEFAULT_MOVE_INTERVAL = 0.0
+# Pin the live struct while the run is live (default on). Pinning itself is the
+# transport's job; the tracker only decides when: pin on the post that places the
+# struct and unpin the moment the run ends with every worker succeeded.
+DEFAULT_PIN_MESSAGE = True
 
 # Run-phase statuses that mean "this worker is finished".
 _SETTLED_RUN = ("done", "failed", "cancelled", "blocked", "interrupted")
@@ -73,12 +77,20 @@ class Action:
     ``move`` is the opt-in alternative to an edit (``move_interval > 0``): it
     sends a fresh message and then deletes ``message_id`` (the previous struct),
     keeping exactly the newest one live.
+
+    The ``pin`` flag asks the notifier to pin the message this action leaves live
+    (the fresh id of a ``post``/``move``). The ``unpin`` flag asks it to release
+    ``message_id``, once, when the run has ended with every worker succeeded. A
+    run that ends there without a render change emits the dedicated ``unpin``
+    kind (no text, nothing to edit) so the release still happens.
     """
 
-    kind: str  # "post" | "edit" | "move"
+    kind: str  # "post" | "edit" | "move" | "unpin"
     run_key: str
     text: str
     message_id: str | None = None
+    pin: bool = False
+    unpin: bool = False
 
 
 @dataclass
@@ -137,6 +149,11 @@ class _RunState:
     phrase_at: float = float("-inf")
     pending: bool = False
     terminal: bool = False
+    # Pinned/unpinned bookkeeping: `unpinned` latches the one allowed release so a
+    # late tick or a duplicated terminal event cannot unpin twice; `unpin_pending`
+    # carries the release to the next emitted action.
+    unpinned: bool = False
+    unpin_pending: bool = False
 
 
 class StatusTracker:
@@ -149,6 +166,7 @@ class StatusTracker:
         min_edit_interval: float = DEFAULT_MIN_EDIT_INTERVAL,
         phrase_interval: float = DEFAULT_PHRASE_INTERVAL,
         move_interval: float = DEFAULT_MOVE_INTERVAL,
+        pin_message: bool = DEFAULT_PIN_MESSAGE,
         max_chars: int = DEFAULT_MAX_CHARS,
         activity_provider: Callable[[str, str], str | None] | None = None,
         activity_interval: float | None = None,
@@ -157,6 +175,9 @@ class StatusTracker:
         self.min_edit_interval = max(0.0, float(min_edit_interval))
         self.phrase_interval = max(0.0, float(phrase_interval))
         self.move_interval = max(0.0, float(move_interval))
+        # Whether to pin the live struct at all. Off means neither the pin nor its
+        # matching unpin is ever emitted, so the two can never disagree.
+        self.pin_message = bool(pin_message)
         self.max_chars = max_chars
         # Optional, injected: reads the worker's live tool call from its profile
         # state DB. Absent (the default) means no activity is observable and the
@@ -184,7 +205,22 @@ class StatusTracker:
         self._reduce(state, str(event), payload, now)
         if self._settled(state):
             state.terminal = True
-        return self._maybe_emit(state, now, force=state.terminal)
+        # Unpin exactly once, and only on the successful terminal: a failed,
+        # blocked, cancelled or interrupted run (or one still running) stays
+        # pinned, as does any non-terminal state.
+        if self.pin_message and state.terminal and self._all_succeeded(state) and not state.unpinned:
+            state.unpinned = True
+            state.unpin_pending = True
+        action = self._maybe_emit(state, now, force=state.terminal)
+        if state.unpin_pending:
+            state.unpin_pending = False
+            if action is None:
+                # The terminal edit rendered the same text, so no delivery would
+                # otherwise carry the release: ask for it on its own.
+                action = Action("unpin", state.run_key, "", state.message_id)
+            else:
+                action.unpin = True
+        return action
 
     def tick(self) -> list[Action]:
         """Advance the rotation clock and flush anything throttled or rotated."""
@@ -290,6 +326,16 @@ class StatusTracker:
             return False
         return all(block.run_status() in _SETTLED_RUN for block in state.blocks)
 
+    def _all_succeeded(self, state: _RunState) -> bool:
+        """True only when every worker finished successfully.
+
+        This is the single condition the unpin turns on. Overriding it inverts the
+        release (a test uses that to prove the condition is not vacuous).
+        """
+        if not state.blocks:
+            return False
+        return all(block.run_status() == "done" for block in state.blocks)
+
     # ── rendering ─────────────────────────────────────────────────────
     def _activity_for(self, block: _Block, now: float) -> str:
         """The worker's real tool call, cached on the rotation cadence."""
@@ -363,7 +409,7 @@ class StatusTracker:
             state.last_edit_at = now
             state.last_move_at = now
             state.pending = False
-            return Action("post", state.run_key, text)
+            return Action("post", state.run_key, text, pin=self.pin_message)
         if text == state.last_text:
             state.pending = False
             return None
@@ -382,7 +428,7 @@ class StatusTracker:
             and (now - state.last_move_at) >= self.move_interval
         ):
             state.last_move_at = now
-            return Action("move", state.run_key, text, state.message_id)
+            return Action("move", state.run_key, text, state.message_id, pin=self.pin_message)
         return Action("edit", state.run_key, text, state.message_id)
 
     # ── event reduction ───────────────────────────────────────────────
@@ -617,6 +663,7 @@ __all__ = [
     "DEFAULT_MIN_EDIT_INTERVAL",
     "DEFAULT_MOVE_INTERVAL",
     "DEFAULT_PHRASE_INTERVAL",
+    "DEFAULT_PIN_MESSAGE",
     "ROTATE_INTERVAL_SECONDS",
     "Action",
     "StatusTracker",

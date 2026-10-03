@@ -165,6 +165,9 @@ class Run:
     # The one message the run edits in place. Persisted so a gateway restart keeps
     # editing the same message instead of posting a second one.
     status_message_id: str | None = None
+    # The same message's pin. Persisted so an unpin (or the pin-cap eviction)
+    # still knows which pin is ours after a restart, and only touches our own.
+    status_pinned_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -177,6 +180,7 @@ class Run:
             "chat_id": self.chat_id,
             "thread_id": self.thread_id,
             "status_message_id": self.status_message_id,
+            "status_pinned_id": self.status_pinned_id,
             "workers": [worker.to_dict() for worker in self.workers],
         }
 
@@ -203,6 +207,7 @@ class Run:
             chat_id=as_optional_str(payload.get("chat_id")),
             thread_id=as_optional_str(payload.get("thread_id")),
             status_message_id=as_optional_str(payload.get("status_message_id")),
+            status_pinned_id=as_optional_str(payload.get("status_pinned_id")),
         )
 
     def tree(self) -> str:
