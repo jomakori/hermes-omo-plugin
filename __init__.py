@@ -8,6 +8,7 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
+from omo_tools.jev_tool import JEV_SCHEMA, make_jev_handler  # noqa: E402
 from omo_tools.omo_task_tool import OMO_TASK_SCHEMA, make_omo_task_handler  # noqa: E402
 from omo_tools.omo_tool import OMO_SCHEMA, make_omo_handler, render  # noqa: E402
 from orchestrator.chains import ChainResolver  # noqa: E402
@@ -37,6 +38,17 @@ def _settings(ctx: Any) -> dict[str, Any]:
         "chains": ctx.get_config("chains", None),
         "categories": ctx.get_config("categories", None),
         "enabled_agents": ctx.get_config("enabled_agents", None),
+    }
+
+
+def _jev_settings(ctx: Any) -> dict[str, Any]:
+    return {
+        "enabled": ctx.get_config("jev_enabled", True),
+        "base_url": ctx.get_config("jev_base_url", "https://api.typesafe.ai"),
+        "model": ctx.get_config("jev_model", "jev-latest"),
+        "timeout_s": ctx.get_config("jev_timeout_s", 10),
+        "thresholds": ctx.get_config("jev_thresholds", None),
+        "api_key_env": ctx.get_config("jev_api_key_env", "TYPESAFE_AI_API_KEY"),
     }
 
 
@@ -134,6 +146,24 @@ def register(ctx: Any) -> None:
         requires_env=[],
         is_async=True,
         description="Delegate a subtask to one OMO agent or category worker.",
+    )
+    _js = _jev_settings(ctx)
+    ctx.register_tool(
+        name="jev_ask",
+        toolset="omo",
+        schema=JEV_SCHEMA,
+        handler=make_jev_handler(
+            base_url=_js["base_url"],
+            model=_js["model"],
+            timeout_s=float(_js["timeout_s"]),
+            api_key_env=_js["api_key_env"],
+            threshold_overrides=_js["thresholds"],
+            enabled=bool(_js["enabled"]),
+        ),
+        check_fn=lambda: True,
+        requires_env=[],
+        is_async=True,
+        description="Advisory typed-decision classifier (TypeSafe Jev); returns a probability envelope.",
     )
     _register_optional(
         ctx,

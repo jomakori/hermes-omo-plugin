@@ -76,8 +76,37 @@ One host setting matters for the planning pipeline: Hermes derives a child agent
 |---|---|
 | `omo` | `dispatch` (one task or a whole graph) / `status` / `tree` / `cancel` — the reads and `cancel` are scoped to the calling session unless `all_sessions=true` |
 | `omo_task` | Delegate one subtask (`agent=`) or spawn a category worker (`category=`) — attributed to the calling session like any dispatch |
+| `jev_ask` | Advisory [TypeSafe Jev](#jev_ask--advisory-decisions) typed-decision classifier (`route_intent` / `gate_risk` / `pick_skill`) — returns a probability envelope; **never executes anything** |
 
 `omo_task` takes exactly one of `agent=` or `category=`.
+
+### `jev_ask` — advisory decisions
+
+`jev_ask` asks [TypeSafe Jev](https://typesafe.ai) — a small **typed-decision classifier** (not a chat model; it returns probabilities over an option set, never text) — for a judgment and hands the result back as a code-authored envelope. It is **advisory by construction**: Jev answers, code decides, and the tool executes nothing.
+
+Three packs ship (`pack=`):
+
+| Pack | Primitives | State keys |
+|---|---|---|
+| `route_intent` | `choice` tier (trivial/quick/scoped/exploratory/complex/ambiguous) + `choice` domain | `user_message`, `last_question`, `cwd_basename` |
+| `gate_risk` | `noul` irreversible / external_side_effect / destructive / secrets_involved | `action_text`, `dry_run` |
+| `pick_skill` | `choice` over a caller-supplied shortlist (`skill_shortlist`, ≤255) | `user_request`, `shortlist` |
+
+The envelope is always valid JSON and never raises: `{pack, pack_version, backend, model, status, decisions, usage, cost_usd, latency_ms, notes}`. `status` is `ok` or `unavailable`; on `unavailable` (key missing, timeout, a non-retryable error, or `jev_enabled=false`) the pack's deterministic defaults are returned so the caller branches and continues — nothing blocks. State is **default-deny** (only the pack's allowlisted keys are sent) and **redacted** (bearer tokens, key-like strings, secrets) before it leaves the cluster. Latency is measured client-side — Jev returns none.
+
+Config, under `plugins.entries.omo.settings`:
+
+```yaml
+jev_enabled: true                       # false short-circuits to defaults
+jev_base_url: "https://api.typesafe.ai"
+jev_model: "jev-latest"
+jev_timeout_s: 10
+jev_api_key_env: "TYPESAFE_AI_API_KEY"  # read from the environment at call time
+# jev_thresholds: {destructive: 0.9}    # optional per-primitive overrides
+```
+
+Requires the `TYPESAFE_AI_API_KEY` env var. The key is never logged or returned.
+
 
 Dispatch blocks by default; pass `background=true` to get a `run_id` immediately and poll it with `status`. The flag applies to a `tasks=` graph as well as to a single task: the graph is declared, its `run_id` returned, and the schedule runs off the tool call instead of holding it open until the last task settles. The run registry is **durable**: runs and their workers are checkpointed to `state_path` as they change, so a gateway restart answers `status` from the record rather than from an empty list. A worker whose process is gone is reported `INTERRUPTED` — the record is real, the work it was doing is not verified.
 
