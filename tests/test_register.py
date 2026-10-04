@@ -41,7 +41,7 @@ def test_register_wires_tools_and_command():
     ctx = RecordingCtx()
     plugin.register(ctx)
 
-    assert set(ctx.tools) == {"omo", "omo_task"}
+    assert set(ctx.tools) == {"omo", "omo_task", "jev_ask"}
     for tool in ctx.tools.values():
         assert tool["is_async"] is True
         assert tool["toolset"] == "omo"
@@ -174,13 +174,13 @@ class InertAttributeCtx(RecordingCtx):
 def test_optional_surfaces_are_skipped_individually_not_as_a_group():
     ctx = RequiredSurfaceOnlyCtx()
     plugin.register(ctx)
-    assert set(ctx.tools) == {"omo", "omo_task"}
+    assert set(ctx.tools) == {"omo", "omo_task", "jev_ask"}
 
 
 def test_registration_never_branches_on_a_host_attribute_we_do_not_use():
     ctx = InertAttributeCtx()
     plugin.register(ctx)
-    assert set(ctx.tools) == {"omo", "omo_task"}
+    assert set(ctx.tools) == {"omo", "omo_task", "jev_ask"}
     assert set(ctx.commands) == {"omo"}
     assert set(ctx.skills) == set(plugin.AGENTS)
     assert len(ctx.unload) == 1
