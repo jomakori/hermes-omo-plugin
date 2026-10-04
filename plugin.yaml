@@ -1,5 +1,5 @@
 name: omo
-version: 0.3.1
+version: 0.4.0
 description: >-
   Native OMO (Oh My OpenAgent) multi-agent orchestration for Hermes Agent —
   the ported agent fleet (Sisyphus, Hephaestus, Prometheus, Atlas, Metis,

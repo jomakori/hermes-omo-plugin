@@ -82,6 +82,34 @@ def _verdict(question_id: str, answer: dict[str, Any], threshold: float) -> dict
     return {"value": None, "source": "jev", "guidance": "Unknown question type.", "confident": False}
 
 
+def authoritative_target(
+    pack_decision: Any,
+    valid_targets: Any,
+    threshold: float,
+) -> str | None:
+    """Jev's dispatch pick, or None when it must not be trusted.
+
+    Authority rule (spec §6.1 — Jev answers, code decides): the pick is accepted
+    only when it names a member of ``valid_targets`` (the enabled roster plus
+    categories) *and* its confidence reaches ``threshold``. Any missing value,
+    non-numeric confidence, out-of-vocabulary answer, or sub-threshold confidence
+    returns None so the caller keeps its static resolution. Pure; no I/O.
+    """
+    if not isinstance(pack_decision, dict):
+        return None
+    value = pack_decision.get("value")
+    if value is None:
+        return None
+    confidence = pack_decision.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        return None
+    if float(confidence) < float(threshold):
+        return None
+    if value not in valid_targets:
+        return None
+    return str(value)
+
+
 def apply_policy(
     pack_name: str,
     answers: dict[str, Any],
@@ -118,4 +146,4 @@ def apply_policy(
     return decisions
 
 
-__all__ = ["apply_policy", "_DEFAULT_THRESHOLDS"]
+__all__ = ["apply_policy", "authoritative_target", "_DEFAULT_THRESHOLDS"]

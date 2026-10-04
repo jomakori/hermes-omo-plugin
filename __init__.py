@@ -49,6 +49,8 @@ def _jev_settings(ctx: Any) -> dict[str, Any]:
         "timeout_s": ctx.get_config("jev_timeout_s", 10),
         "thresholds": ctx.get_config("jev_thresholds", None),
         "api_key_env": ctx.get_config("jev_api_key_env", "TYPESAFE_AI_API_KEY"),
+        "routing_enabled": ctx.get_config("jev_routing_enabled", False),
+        "routing_threshold": ctx.get_config("jev_routing_threshold", 0.75),
     }
 
 
