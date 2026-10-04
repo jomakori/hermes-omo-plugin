@@ -292,7 +292,7 @@ class OmoEngine:
         try:
             if not self._config("jev_shadow_enabled", False):
                 return
-            packs = self._config("jev_shadow_packs", ["route_intent"])
+            packs = self._config("jev_shadow_packs", ["pick_agent"])
             if isinstance(packs, str):
                 packs = [packs]
             packs = [str(pack) for pack in (packs or []) if str(pack).strip()]

@@ -281,7 +281,7 @@ def test_jev_schema_shape():
     assert "pack" in params["properties"]
     assert "state" in params["properties"]
     assert params["required"] == ["pack", "state"]
-    assert set(params["properties"]["pack"]["enum"]) == {"route_intent", "gate_risk", "pick_skill"}
+    assert set(params["properties"]["pack"]["enum"]) == {"route_intent", "gate_risk", "pick_skill", "pick_agent"}
 
 
 def test_redact_state_allowlist_filters_unknown_keys():

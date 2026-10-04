@@ -76,7 +76,7 @@ One host setting matters for the planning pipeline: Hermes derives a child agent
 |---|---|
 | `omo` | `dispatch` (one task or a whole graph) / `status` / `tree` / `cancel` — the reads and `cancel` are scoped to the calling session unless `all_sessions=true` |
 | `omo_task` | Delegate one subtask (`agent=`) or spawn a category worker (`category=`) — attributed to the calling session like any dispatch |
-| `jev_ask` | Advisory [TypeSafe Jev](#jev_ask--advisory-decisions) typed-decision classifier (`route_intent` / `gate_risk` / `pick_skill`) — returns a probability envelope; **never executes anything** |
+| `jev_ask` | Advisory [TypeSafe Jev](#jev_ask--advisory-decisions) typed-decision classifier (`route_intent` / `gate_risk` / `pick_skill` / `pick_agent`) — returns a probability envelope; **never executes anything** |
 
 `omo_task` takes exactly one of `agent=` or `category=`.
 
@@ -84,13 +84,14 @@ One host setting matters for the planning pipeline: Hermes derives a child agent
 
 `jev_ask` asks [TypeSafe Jev](https://typesafe.ai) — a small **typed-decision classifier** (not a chat model; it returns probabilities over an option set, never text) — for a judgment and hands the result back as a code-authored envelope. It is **advisory by construction**: Jev answers, code decides, and the tool executes nothing.
 
-Three packs ship (`pack=`):
+Four packs ship (`pack=`):
 
 | Pack | Primitives | State keys |
 |---|---|---|
 | `route_intent` | `choice` tier (trivial/quick/scoped/exploratory/complex/ambiguous) + `choice` domain | `user_message`, `last_question`, `cwd_basename` |
 | `gate_risk` | `noul` irreversible / external_side_effect / destructive / secrets_involved | `action_text`, `dry_run` |
 | `pick_skill` | `choice` over a caller-supplied shortlist (`skill_shortlist`, ≤255) | `user_request`, `shortlist` |
+| `pick_agent` | `choice` over a candidate map of agents + categories (`agent_candidates`, ≤255; defaults to the enabled roster) | `user_message`, `last_question`, `cwd_basename` |
 
 The envelope is always valid JSON and never raises: `{pack, pack_version, backend, model, status, decisions, usage, cost_usd, latency_ms, notes}`. `status` is `ok` or `unavailable`; on `unavailable` (key missing, timeout, a non-retryable error, or `jev_enabled=false`) the pack's deterministic defaults are returned so the caller branches and continues — nothing blocks. State is **default-deny** (only the pack's allowlisted keys are sent) and **redacted** (bearer tokens, key-like strings, secrets) before it leaves the cluster. Latency is measured client-side — Jev returns none.
 
@@ -111,6 +112,8 @@ Requires the `TYPESAFE_AI_API_KEY` env var. The key is never logged or returned.
 
 Phase 2 lets Jev run **beside** dispatch without touching it. When `jev_shadow_enabled` is on, every `dispatch` fires the configured packs against the same input on a **daemon thread**, records Jev's verdict next to the decision the engine actually made, and returns immediately — the shadow call never adds latency to, or fails, a dispatch, and any error (bad path, full disk, Jev down) is swallowed. Nothing in the routing path reads the result.
 
+The harness runs **`pick_agent`** by default: its candidate map (agents + categories) is the same vocabulary the engine resolves to, so `caller_decision` and Jev's `agent` choice are compared like-for-like rather than across unrelated label spaces.
+
 Each row is one JSON object in a JSONL sink: `{ts, pack, state_hash, jev_decisions, jev_confidence, caller_decision, agreed, latency_ms, model, status}`. `state_hash` is a **sha256 of the input** — raw state, prompts, and the API key are never written.
 
 `jev_report` prints the roll-up: total records, per-pack counts, agreement %, ECE, Brier, and the most recent disagreements (bounded).
@@ -118,7 +121,7 @@ Each row is one JSON object in a JSONL sink: `{ts, pack, state_hash, jev_decisio
 ```yaml
 jev_shadow_enabled: false                            # observation only; default off
 jev_shadow_path: "~/.omo/jev-shadow.jsonl"           # JSONL sink
-jev_shadow_packs: ["route_intent"]                   # packs run in shadow
+jev_shadow_packs: ["pick_agent"]                     # packs run in shadow (like-for-like with dispatch)
 ```
 
 ECE and Brier are computed against `agreed` as the 0/1 outcome, so the numbers measure how well Jev's confidence tracks agreement with the engine — the calibration gate before any Phase 3 cutover.

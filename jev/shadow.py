@@ -9,12 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from jev.client import JevClient
-from jev.packs import PACKS, Pack
+from jev.packs import PACKS, Pack, agent_candidates
 from jev.policy import apply_policy
 from jev.redact import redact_state
 
 DEFAULT_SHADOW_PATH = "~/.omo/jev-shadow.jsonl"
-DEFAULT_SHADOW_PACKS = ("route_intent",)
+DEFAULT_SHADOW_PACKS = ("pick_agent",)
 
 
 def state_hash(state: dict[str, Any]) -> str:
@@ -57,12 +57,11 @@ def pack_confidence(decisions: dict[str, Any]) -> float:
 def decisions_agree(jev_decisions: dict[str, Any], caller_decision: str) -> bool:
     """Shadow agreement: does Jev's verdict name the decision the engine made?
 
-    ``route_intent`` speaks tier/domain labels while the engine resolves an agent
-    or category name; the two share a vocabulary only when they coincide. The
-    comparison is therefore a literal, case-insensitive match of the engine's
-    resolved decision against any Jev decision value — a low rate is itself the
-    finding (Jev's label space is not the engine's), which is what shadow mode
-    exists to surface. No mapping is invented here; that is Phase 3's job.
+    In shadow mode the harness runs ``pick_agent``, whose ``agent`` value is drawn
+    from the same candidate map (agents + categories) the engine resolves to — so
+    the two share a vocabulary and the comparison is a real, like-for-like match.
+    It stays a literal, case-insensitive equality against any Jev decision value;
+    no mapping is invented (that remains Phase 3's job).
     """
     if not caller_decision:
         return False
@@ -81,13 +80,17 @@ def build_payload(pack: Pack, model: str, state: dict[str, Any]) -> dict[str, An
 
     Mirrors the ``jev_ask`` tool's payload so a shadow row is comparable with a
     real call. The state is allowlisted and redacted by ``redact_state`` before it
-    leaves the process.
+    leaves the process. ``pick_agent``'s candidate map is resolved here, at call
+    time, from the roster — never hardcoded in the pack.
     """
     questions: dict[str, Any] = {}
     for question in pack.questions:
+        criteria = question.criteria
+        if pack.name == "pick_agent" and question.id == "agent":
+            criteria = agent_candidates()
         entry: dict[str, Any] = {"type": question.type, "instructions": question.instructions}
-        if question.criteria is not None:
-            entry["criteria"] = question.criteria
+        if criteria is not None:
+            entry["criteria"] = criteria
         questions[question.id] = entry
     return {"model": model, "state": redact_state(pack.name, state), "questions": questions}
 

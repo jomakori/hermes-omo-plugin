@@ -1,21 +1,27 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
+import os
 import threading
 import unittest.mock as mock
 
 import pytest
 
 from jev.metrics import agreement, brier, ece, format_report, summarize
+from jev.packs import PACKS, agent_candidates
 from jev.shadow import (
+    DEFAULT_SHADOW_PACKS,
     ShadowLogger,
+    build_payload,
     decisions_agree,
     pack_confidence,
     run_shadow,
     run_shadow_pack,
     state_hash,
 )
+from omo_tools.jev_tool import make_jev_handler
 from orchestrator.chains import ChainResolver
 from orchestrator.engine import OmoEngine
 
@@ -101,6 +107,114 @@ def test_decisions_agree_matches_jev_verdict_value():
     assert decisions_agree(decisions, "scoped") is True
     assert decisions_agree(decisions, "explore") is False
     assert decisions_agree(decisions, "") is False
+
+
+def test_default_shadow_pack_is_pick_agent():
+    assert DEFAULT_SHADOW_PACKS == ("pick_agent",)
+
+
+def test_pick_agent_payload_carries_candidate_map():
+    payload = build_payload(PACKS["pick_agent"], "jev-latest", {"user_message": "fix the bug"})
+    criteria = payload["questions"]["agent"]["criteria"]
+    assert "explore" in criteria
+    assert "hephaestus" in criteria
+    assert "quick" in criteria
+    assert len(criteria) <= 255
+    assert all(len(key) <= 255 and len(str(value)) <= 255 for key, value in criteria.items())
+
+
+def test_agent_candidates_covers_roster_and_categories():
+    candidates = agent_candidates()
+    assert "explore" in candidates
+    assert "quick" in candidates
+    assert "deep" in candidates
+    assert " · " in candidates["explore"]
+
+
+def test_pick_agent_agreement_true_and_false(tmp_path):
+    path = tmp_path / "shadow.jsonl"
+    response = {"model": "jev-latest", "answers": {"agent": {"choice": "explore", "confidence": 0.9}}}
+    logger = ShadowLogger(path)
+
+    run_shadow_pack(
+        "pick_agent",
+        {"user_message": "find the parser"},
+        "explore",
+        client=_FakeClient(response),
+        model="jev-latest",
+        logger=logger,
+    )
+    run_shadow_pack(
+        "pick_agent",
+        {"user_message": "build the plan"},
+        "prometheus",
+        client=_FakeClient(response),
+        model="jev-latest",
+        logger=logger,
+    )
+
+    records = _read_lines(path)
+    assert [record["agreed"] for record in records] == [True, False]
+    assert records[0]["jev_confidence"] == pytest.approx(0.9)
+
+
+def _pick_agent_handler():
+    return make_jev_handler(
+        base_url="https://api.typesafe.ai",
+        model="jev-latest",
+        timeout_s=5.0,
+        api_key_env="TYPESAFE_AI_API_KEY",
+        threshold_overrides=None,
+        enabled=True,
+    )
+
+
+def _capturing_urlopen(captured: dict):
+    def _urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode())
+        cm = mock.MagicMock()
+        cm.__enter__ = mock.Mock(return_value=cm)
+        cm.__exit__ = mock.Mock(return_value=False)
+        cm.read.return_value = json.dumps(
+            {"model": "jev-latest", "answers": {"agent": {"choice": "explore", "confidence": 0.9}}}
+        ).encode()
+        cm.status = 200
+        return cm
+
+    return _urlopen
+
+
+def test_jev_ask_pick_agent_fills_candidates_from_roster():
+    captured: dict = {}
+    handler = _pick_agent_handler()
+    with mock.patch("urllib.request.urlopen", side_effect=_capturing_urlopen(captured)):
+        with mock.patch.dict(os.environ, {"TYPESAFE_AI_API_KEY": "test-key"}):
+            result = asyncio.run(handler({"pack": "pick_agent", "state": {"user_message": "find the parser"}}))
+
+    envelope = json.loads(result)
+    assert envelope["status"] == "ok"
+    criteria = captured["body"]["questions"]["agent"]["criteria"]
+    assert "explore" in criteria
+    assert "quick" in criteria
+
+
+def test_jev_ask_pick_agent_honours_caller_candidates():
+    captured: dict = {}
+    handler = _pick_agent_handler()
+    with mock.patch("urllib.request.urlopen", side_effect=_capturing_urlopen(captured)):
+        with mock.patch.dict(os.environ, {"TYPESAFE_AI_API_KEY": "test-key"}):
+            asyncio.run(
+                handler(
+                    {
+                        "pack": "pick_agent",
+                        "state": {"user_message": "x"},
+                        "agent_candidates": {"hephaestus": "builder", "quick": "small task"},
+                    }
+                )
+            )
+
+    criteria = captured["body"]["questions"]["agent"]["criteria"]
+    assert criteria == {"hephaestus": "builder", "quick": "small task"}
 
 
 def test_run_shadow_writes_record_with_computed_agreement(tmp_path):
