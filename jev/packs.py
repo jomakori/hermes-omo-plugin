@@ -120,18 +120,21 @@ PACKS: dict[str, Pack] = {
 }
 
 
-def agent_candidates() -> dict[str, str]:
-    """The ``pick_agent`` option map: enabled agents plus categories, at call time.
+def agent_candidates(enabled: set[str] | None = None) -> dict[str, str]:
+    """The ``pick_agent`` option map: agents plus categories, at call time.
 
     Values are the roster's short display (``name · role``); categories map to
-    their own name. The roster is never baked into the pack — the caller supplies
-    this map as dynamic ``criteria``, exactly as ``pick_skill`` takes a shortlist.
-    Clamped to 255 entries and 255-char strings to match the vendor's limits.
+    their own name. ``enabled`` restricts the agent half to that set (an empty or
+    None set means the whole roster) — the roster is never baked into the pack, the
+    caller supplies this map as dynamic ``criteria`` exactly as ``pick_skill``
+    takes a shortlist. Clamped to 255 entries and 255-char strings.
     """
     from roster import AGENTS, CATEGORIES
 
     candidates: dict[str, str] = {}
     for name, spec in AGENTS.items():
+        if enabled is not None and name not in enabled:
+            continue
         candidates[str(name)[:255]] = str(spec.display)[:255]
     for name in CATEGORIES:
         candidates.setdefault(str(name)[:255], str(name)[:255])

@@ -126,6 +126,25 @@ jev_shadow_packs: ["pick_agent"]                     # packs run in shadow (like
 
 ECE and Brier are computed against `agreed` as the 0/1 outcome, so the numbers measure how well Jev's confidence tracks agreement with the engine — the calibration gate before any Phase 3 cutover.
 
+### Authoritative mode (opt-in)
+
+**Default off.** With `jev_routing_enabled: false` — the default — dispatch is byte-identical to before Jev existed. Turning it on lets Jev's `pick_agent` verdict choose the dispatch target, but only inside a deterministic cage:
+
+- **Floor.** An explicit `agent=`/`category=` from the caller always wins; Jev is not consulted for it.
+- **Validity.** Jev's pick is accepted only if it names an **enabled** roster agent or a category. An out-of-vocabulary answer (defended against even though Jev can only return a member of the option set) is ignored.
+- **Threshold.** The pick must score at least `jev_routing_threshold` (default `0.75`).
+- **Fail-open.** Off-spec answers, a timeout (bounded by `jev_timeout_s`), a missing key, or any error fall back to the static resolution unchanged — the static path is the safety net.
+
+Every accepted/rejected decision emits a `jev_route` event naming `source` (`jev`|`static`), `confidence`, and the chosen `target`.
+
+> **Do not enable this until shadow evidence clears the bar.** Run `jev_shadow_enabled` first and confirm the agreement/ECE/Brier numbers show Jev is calibrated on *our* traces for the `pick_agent` pack. Enablement is a config decision, not a code one; the flag exists so a revert is a single config flip.
+
+```yaml
+jev_routing_enabled: false    # authoritative dispatch; default off — shadow first
+jev_routing_threshold: 0.75   # min pick_agent confidence to override the static target
+```
+
+
 
 
 Dispatch blocks by default; pass `background=true` to get a `run_id` immediately and poll it with `status`. The flag applies to a `tasks=` graph as well as to a single task: the graph is declared, its `run_id` returned, and the schedule runs off the tool call instead of holding it open until the last task settles. The run registry is **durable**: runs and their workers are checkpointed to `state_path` as they change, so a gateway restart answers `status` from the record rather than from an empty list. A worker whose process is gone is reported `INTERRUPTED` — the record is real, the work it was doing is not verified.

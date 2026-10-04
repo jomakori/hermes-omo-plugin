@@ -237,7 +237,9 @@ class OmoEngine:
         background: bool = False,
         parent_agent: str | None = None,
     ) -> dict[str, Any]:
-        name, chain = self._resolve_target(target=target, category=category, parent_agent=parent_agent)
+        name, chain = self._resolve_dispatch_target(
+            goal=goal, target=target, category=category, parent_agent=parent_agent
+        )
         # Observation only: Jev runs beside the resolved decision and never feeds
         # back into it. The record is the engine's own answer, not a route choice.
         self._shadow_dispatch(goal=goal, caller_decision=category or name)
@@ -280,6 +282,72 @@ class OmoEngine:
             return self._ctx.get_config(key, default)
         except Exception:
             return default
+
+    def _resolve_dispatch_target(
+        self, *, goal: str, target: str | None, category: str | None, parent_agent: str | None
+    ) -> tuple[str, tuple[str, ...]]:
+        """Resolve the dispatch target, optionally letting Jev pick when no explicit choice was given.
+
+        Default OFF: with ``jev_routing_enabled`` unset this is exactly
+        ``_resolve_target`` and behaviour is unchanged. When on, the deterministic
+        floor still wins — an explicit ``agent=``/``category=`` is never
+        second-guessed and Jev is not consulted. Jev only fills the
+        otherwise-unroutable no-explicit case, and any rejection falls back to the
+        static resolution unchanged.
+        """
+        if not bool(self._config("jev_routing_enabled", False)):
+            return self._resolve_target(target=target, category=category, parent_agent=parent_agent)
+        if target is not None or category is not None:
+            name, chain = self._resolve_target(target=target, category=category, parent_agent=parent_agent)
+            self._emit_route("static", 0.0, name, "explicit")
+            return name, chain
+        pick, confidence, status = self._jev_pick(goal)
+        if pick is not None:
+            try:
+                name, chain = self._resolve_target(target=pick, category=None, parent_agent=parent_agent)
+                self._emit_route("jev", confidence, name, status)
+                return name, chain
+            except Exception:
+                pass
+        self._emit_route("static", confidence, None, status)
+        return self._resolve_target(target=target, category=category, parent_agent=parent_agent)
+
+    def _jev_pick(self, goal: str) -> tuple[str | None, float, str]:
+        """One synchronous, bounded ``pick_agent`` call for authoritative routing.
+
+        Fail-open: a broken import, a missing key, a timeout, or any error returns
+        ``(None, 0.0, ...)`` so the caller keeps its static target.
+        """
+        try:
+            from jev.packs import agent_candidates
+            from jev.routing import route_agent  # noqa: PLC0415 - optional routing surface
+
+            candidates = agent_candidates(self._enabled_agents())
+            return route_agent(
+                state={"user_message": goal},
+                valid_targets=set(candidates),
+                candidates=candidates,
+                threshold=float(self._config("jev_routing_threshold", 0.75)),
+                base_url=self._config("jev_base_url", "https://api.typesafe.ai"),
+                model=self._config("jev_model", "jev-latest"),
+                timeout_s=float(self._config("jev_timeout_s", 10)),
+                api_key_env=self._config("jev_api_key_env", "TYPESAFE_AI_API_KEY"),
+            )
+        except Exception:
+            return None, 0.0, "error"
+
+    def _emit_route(self, source: str, confidence: float, target: str | None, status: str = "") -> None:
+        """Announce how a dispatch target was chosen: source, confidence, target."""
+        emit = getattr(self._ctx, "emit", None)
+        if not callable(emit):
+            return
+        try:
+            emit(
+                "jev_route",
+                {"source": source, "confidence": float(confidence), "target": target or "", "status": status},
+            )
+        except Exception:
+            pass
 
     def _shadow_dispatch(self, *, goal: str, caller_decision: str) -> None:
         """Observe Jev's routing verdict beside the engine's, off the hot path.
