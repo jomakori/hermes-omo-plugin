@@ -103,7 +103,39 @@ PACKS: dict[str, Pack] = {
         state_keys=("user_request", "shortlist"),
         defaults={"skill": None},
     ),
+    "pick_agent": Pack(
+        name="pick_agent",
+        version=1,
+        questions=(
+            Question(
+                id="agent",
+                type="choice",
+                instructions="Which specialist agent or category should handle this request?",
+                criteria=None,
+            ),
+        ),
+        state_keys=("user_message", "last_question", "cwd_basename"),
+        defaults={"agent": None},
+    ),
 }
 
 
-__all__ = ["Question", "Pack", "PACKS"]
+def agent_candidates() -> dict[str, str]:
+    """The ``pick_agent`` option map: enabled agents plus categories, at call time.
+
+    Values are the roster's short display (``name · role``); categories map to
+    their own name. The roster is never baked into the pack — the caller supplies
+    this map as dynamic ``criteria``, exactly as ``pick_skill`` takes a shortlist.
+    Clamped to 255 entries and 255-char strings to match the vendor's limits.
+    """
+    from roster import AGENTS, CATEGORIES
+
+    candidates: dict[str, str] = {}
+    for name, spec in AGENTS.items():
+        candidates[str(name)[:255]] = str(spec.display)[:255]
+    for name in CATEGORIES:
+        candidates.setdefault(str(name)[:255], str(name)[:255])
+    return dict(list(candidates.items())[:255])
+
+
+__all__ = ["Question", "Pack", "PACKS", "agent_candidates"]

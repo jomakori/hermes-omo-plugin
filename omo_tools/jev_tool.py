@@ -6,7 +6,7 @@ from typing import Any
 
 from jev.client import JevClient
 from jev.envelope import build_envelope, unavailable_envelope
-from jev.packs import PACKS
+from jev.packs import PACKS, agent_candidates
 from jev.policy import apply_policy
 from jev.redact import redact_state
 
@@ -14,7 +14,7 @@ JEV_SCHEMA: dict[str, Any] = {
     "name": "jev_ask",
     "description": (
         "Ask the TypeSafe Jev typed-decision classifier for a probabilistic verdict on a pack "
-        "(route_intent, gate_risk, pick_skill). Returns a code-authored advisory envelope — "
+        "(route_intent, gate_risk, pick_skill, pick_agent). Returns a code-authored advisory envelope — "
         "Jev never executes anything; code owns the action."
     ),
     "parameters": {
@@ -22,14 +22,14 @@ JEV_SCHEMA: dict[str, Any] = {
         "properties": {
             "pack": {
                 "type": "string",
-                "enum": ["route_intent", "gate_risk", "pick_skill"],
+                "enum": ["route_intent", "gate_risk", "pick_skill", "pick_agent"],
                 "description": "Which decision pack to run.",
             },
             "state": {
                 "type": "object",
                 "description": (
                     "State keys for the pack. "
-                    "route_intent: {user_message, last_question, cwd_basename}. "
+                    "route_intent / pick_agent: {user_message, last_question, cwd_basename}. "
                     "gate_risk: {action_text, dry_run}. "
                     "pick_skill: {user_request, shortlist}."
                 ),
@@ -37,6 +37,13 @@ JEV_SCHEMA: dict[str, Any] = {
             "skill_shortlist": {
                 "type": "object",
                 "description": "For pick_skill only: map of skill_name -> one-line description (≤255 entries).",
+            },
+            "agent_candidates": {
+                "type": "object",
+                "description": (
+                    "For pick_agent only: map of agent/category name -> short description "
+                    "(≤255 entries). Omit to use the enabled OMO roster."
+                ),
             },
         },
         "required": ["pack", "state"],
@@ -109,6 +116,9 @@ def make_jev_handler(
             if pack_name == "pick_skill" and q.id == "skill":
                 shortlist = params.get("skill_shortlist") or {}
                 criteria = {str(k)[:255]: str(v)[:255] for k, v in list(shortlist.items())[:255]}
+            if pack_name == "pick_agent" and q.id == "agent":
+                candidates = params.get("agent_candidates") or agent_candidates()
+                criteria = {str(k)[:255]: str(v)[:255] for k, v in list(candidates.items())[:255]}
             entry: dict[str, Any] = {"type": q.type, "instructions": q.instructions}
             if criteria is not None:
                 entry["criteria"] = criteria

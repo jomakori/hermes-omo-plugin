@@ -51,7 +51,7 @@ def test_register_wires_tools_and_command():
     assert ctx.tools["omo_task"]["schema"]["parameters"]["required"] == ["prompt"]
 
     assert ctx.hooks == {}
-    assert set(ctx.commands) == {"omo"}
+    assert set(ctx.commands) == {"omo", "jev_report"}
     assert set(ctx.skills) == set(plugin.AGENTS)
     assert len(ctx.unload) == 1
 
@@ -181,7 +181,7 @@ def test_registration_never_branches_on_a_host_attribute_we_do_not_use():
     ctx = InertAttributeCtx()
     plugin.register(ctx)
     assert set(ctx.tools) == {"omo", "omo_task", "jev_ask"}
-    assert set(ctx.commands) == {"omo"}
+    assert set(ctx.commands) == {"omo", "jev_report"}
     assert set(ctx.skills) == set(plugin.AGENTS)
     assert len(ctx.unload) == 1
 

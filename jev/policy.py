@@ -18,6 +18,9 @@ _DEFAULT_THRESHOLDS: dict[str, dict[str, float]] = {
     "pick_skill": {
         "skill": 0.5,
     },
+    "pick_agent": {
+        "agent": 0.5,
+    },
 }
 
 
