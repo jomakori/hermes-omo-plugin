@@ -52,6 +52,18 @@ def _jev_settings(ctx: Any) -> dict[str, Any]:
     }
 
 
+def _jev_report(ctx: Any) -> str:
+    """Render the shadow agreement/calibration report from the JSONL sink."""
+    try:
+        from jev.metrics import format_report
+        from jev.shadow import DEFAULT_SHADOW_PATH, ShadowLogger
+
+        path = ctx.get_config("jev_shadow_path", DEFAULT_SHADOW_PATH)
+        return format_report(ShadowLogger(path).read())
+    except Exception as exc:
+        return f"Jev shadow report unavailable: {exc}"
+
+
 def _store(ctx: Any) -> RunStore:
     return RunStore(
         path=ctx.get_config("state_path", None),
@@ -171,6 +183,13 @@ def register(ctx: Any) -> None:
         "omo",
         handler=lambda *_a, **_k: render(engine.status()),
         description="Show OMO runs and workers.",
+    )
+    _register_optional(
+        ctx,
+        "register_command",
+        "jev_report",
+        handler=lambda *_a, **_k: _jev_report(ctx),
+        description="Show the Jev shadow agreement and calibration report.",
     )
     for name in AGENTS:
         persona = AGENTS_DIR / f"{name}.md"

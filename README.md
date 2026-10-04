@@ -107,6 +107,23 @@ jev_api_key_env: "TYPESAFE_AI_API_KEY"  # read from the environment at call time
 
 Requires the `TYPESAFE_AI_API_KEY` env var. The key is never logged or returned.
 
+### Shadow mode & calibration
+
+Phase 2 lets Jev run **beside** dispatch without touching it. When `jev_shadow_enabled` is on, every `dispatch` fires the configured packs against the same input on a **daemon thread**, records Jev's verdict next to the decision the engine actually made, and returns immediately — the shadow call never adds latency to, or fails, a dispatch, and any error (bad path, full disk, Jev down) is swallowed. Nothing in the routing path reads the result.
+
+Each row is one JSON object in a JSONL sink: `{ts, pack, state_hash, jev_decisions, jev_confidence, caller_decision, agreed, latency_ms, model, status}`. `state_hash` is a **sha256 of the input** — raw state, prompts, and the API key are never written.
+
+`jev_report` prints the roll-up: total records, per-pack counts, agreement %, ECE, Brier, and the most recent disagreements (bounded).
+
+```yaml
+jev_shadow_enabled: false                            # observation only; default off
+jev_shadow_path: "~/.omo/jev-shadow.jsonl"           # JSONL sink
+jev_shadow_packs: ["route_intent"]                   # packs run in shadow
+```
+
+ECE and Brier are computed against `agreed` as the 0/1 outcome, so the numbers measure how well Jev's confidence tracks agreement with the engine — the calibration gate before any Phase 3 cutover.
+
+
 
 Dispatch blocks by default; pass `background=true` to get a `run_id` immediately and poll it with `status`. The flag applies to a `tasks=` graph as well as to a single task: the graph is declared, its `run_id` returned, and the schedule runs off the tool call instead of holding it open until the last task settles. The run registry is **durable**: runs and their workers are checkpointed to `state_path` as they change, so a gateway restart answers `status` from the record rather than from an empty list. A worker whose process is gone is reported `INTERRUPTED` — the record is real, the work it was doing is not verified.
 

@@ -238,6 +238,9 @@ class OmoEngine:
         parent_agent: str | None = None,
     ) -> dict[str, Any]:
         name, chain = self._resolve_target(target=target, category=category, parent_agent=parent_agent)
+        # Observation only: Jev runs beside the resolved decision and never feeds
+        # back into it. The record is the engine's own answer, not a route choice.
+        self._shadow_dispatch(goal=goal, caller_decision=category or name)
         chain = tuple(self._normalize_model(model) or model for model in chain)
         run_id = f"omo_{uuid.uuid4().hex[:8]}"
         # Stamp the run with the session that is paying for it, so a later read or
@@ -277,6 +280,44 @@ class OmoEngine:
             return self._ctx.get_config(key, default)
         except Exception:
             return default
+
+    def _shadow_dispatch(self, *, goal: str, caller_decision: str) -> None:
+        """Observe Jev's routing verdict beside the engine's, off the hot path.
+
+        Fire-and-forget: a daemon thread runs the shadow packs so neither the
+        network call nor the JSONL write can add latency to (or fail) a dispatch.
+        Every failure is swallowed here as well, so a broken jev import, a missing
+        `$HOME`, or a full disk cannot cost the dispatch it is merely observing.
+        """
+        try:
+            if not self._config("jev_shadow_enabled", False):
+                return
+            packs = self._config("jev_shadow_packs", ["route_intent"])
+            if isinstance(packs, str):
+                packs = [packs]
+            packs = [str(pack) for pack in (packs or []) if str(pack).strip()]
+            if not packs:
+                return
+            from jev.shadow import run_shadow  # noqa: PLC0415 - observation surface, never on the dispatch path
+
+            thread = threading.Thread(
+                target=run_shadow,
+                kwargs={
+                    "packs": packs,
+                    "state": {"user_message": goal},
+                    "caller_decision": caller_decision,
+                    "path": self._config("jev_shadow_path", "~/.omo/jev-shadow.jsonl"),
+                    "base_url": self._config("jev_base_url", "https://api.typesafe.ai"),
+                    "model": self._config("jev_model", "jev-latest"),
+                    "timeout_s": float(self._config("jev_timeout_s", 10)),
+                    "api_key_env": self._config("jev_api_key_env", "TYPESAFE_AI_API_KEY"),
+                    "thresholds": self._config("jev_thresholds", None),
+                },
+                daemon=True,
+            )
+            thread.start()
+        except Exception:
+            return
 
     # ── live status ───────────────────────────────────────────────────
     def set_status_notifier(self, notifier: Any) -> None:
