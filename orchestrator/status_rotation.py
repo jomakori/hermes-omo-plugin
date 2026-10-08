@@ -34,16 +34,26 @@ CYCLING_PHRASES: dict[str, tuple[str, ...]] = {
 }
 
 
-def cycling_phrase(phase: str, index: int, activity: str | None = None) -> str:
-    """The rotating phrase for one phase.
-
-    An explicit ``activity`` (the phase's current real activity, when the caller
-    knows it) wins; otherwise the module's phrase set cycles by ``index`` so the
-    line keeps changing even when no new event has arrived.
-    """
+def cycling_phrase(
+    phase: str,
+    index: int,
+    activity: str | None = None,
+    task: str | None = None,
+) -> str:
+    """Observed activity wins; otherwise cycle concise, labelled task detail."""
     if activity is not None and str(activity).strip():
         return str(activity).strip()
-    options = CYCLING_PHRASES.get(phase) or CYCLING_PHRASES["run"]
+    if task is not None and str(task).strip():
+        words = " ".join(str(task).split()).split()
+        prefixes = []
+        for _word in words:
+            candidate = f"task: {' '.join(words[: len(prefixes) + 1])}"
+            if len(candidate) > 29:
+                break
+            prefixes.append(candidate)
+        options = tuple(prefixes)
+    else:
+        options = CYCLING_PHRASES.get(phase) or CYCLING_PHRASES["run"]
     if not options:
         return ""
     return options[int(index) % len(options)]

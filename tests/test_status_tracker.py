@@ -352,11 +352,24 @@ def test_activity_line_changes_when_the_tool_changes():
     assert "🔧 patch b.py" in action[0].text
 
 
-def test_activity_falls_back_to_the_canned_phrase_when_unobservable():
+def test_activity_falls_back_to_the_task_when_unobservable():
     tracker, _ = _tracker(activity_provider=lambda session, agent: None)
-    action = tracker.apply("worker_running", _created(activity_session="s1"))
-    assert "  ↳ cycling:" in action.text
-    assert action.text.splitlines()[-1].strip() != "↳"  # the line is never blank
+    action = tracker.apply("worker_running", _created(activity_session="s1", task="add auth rejection tests"))
+    assert "  ↳ cycling: task: add (3s)" in action.text
+
+
+def test_activity_falls_back_to_generic_phrase_when_task_is_missing():
+    tracker, _ = _tracker(activity_provider=lambda session, agent: None)
+    action = tracker.apply("worker_running", _created(activity_session="s1", goal="", task=""))
+    assert "  ↳ cycling: reading the code… (3s)" in action.text
+
+
+def test_activity_fallback_is_bounded_and_task_specific():
+    tracker, _ = _tracker(activity_provider=lambda session, agent: None)
+    action = tracker.apply("worker_running", _created(activity_session="s1", task="implement " + "long " * 100))
+    line = next(line for line in action.text.splitlines() if line.startswith("  ↳ cycling:"))
+    assert len(line) <= 48
+    assert "task: implement" in line
 
 
 # ── T5 model + hop on the live rows ───────────────────────────────────────────
