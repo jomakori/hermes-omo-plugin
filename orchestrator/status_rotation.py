@@ -49,9 +49,16 @@ def cycling_phrase(
         for _word in words:
             candidate = f"task: {' '.join(words[: len(prefixes) + 1])}"
             if len(candidate) > 29:
+                if not prefixes:
+                    prefixes.append(f"task: {words[0][:23]}")
                 break
             prefixes.append(candidate)
-        options = tuple(prefixes)
+        if not prefixes:
+            options = CYCLING_PHRASES.get(phase) or CYCLING_PHRASES["run"]
+        else:
+            if len(prefixes) == 1:
+                prefixes.append(f"working: {words[0][:20]}")
+            options = tuple(prefixes)
     else:
         options = CYCLING_PHRASES.get(phase) or CYCLING_PHRASES["run"]
     if not options:

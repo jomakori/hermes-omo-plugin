@@ -372,6 +372,25 @@ def test_activity_fallback_is_bounded_and_task_specific():
     assert "task: implement" in line
 
 
+def test_activity_fallback_keeps_a_bounded_unbroken_task_token():
+    tracker, _ = _tracker(activity_provider=lambda session, agent: None)
+    action = tracker.apply("worker_running", _created(activity_session="s1", task="x" * 100))
+    line = next(line for line in action.text.splitlines() if line.startswith("  ↳ cycling:"))
+    assert len(line) <= 48
+    assert line.startswith("  ↳ cycling: task: " + "x" * 23)
+
+
+def test_activity_fallback_rotates_even_for_one_word_tasks():
+    tracker, clock = _tracker(activity_provider=lambda session, agent: None)
+    first = tracker.apply("worker_running", _created(activity_session="s1", task="refactor"))
+    assert "cycling: task: refactor" in first.text
+    tracker.note_message_id("omo_1", "1")
+    clock.advance(DEFAULT_PHRASE_INTERVAL + 0.1)
+    rotated = tracker.tick()
+    assert len(rotated) == 1
+    assert "cycling: working: refactor" in rotated[0].text
+
+
 # ── T5 model + hop on the live rows ───────────────────────────────────────────
 
 
