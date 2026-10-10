@@ -15,6 +15,16 @@ HOP_REASON_SUCCESS = "success"
 # Credits-out is its own bucket: it is the dominant failure on this stack and it
 # is not fixable by retrying or by another hop on the same drained account.
 HOP_REASON_BILLING = "billing"
+# A provider that answers with its own "this account cannot serve right now"
+# code — GitHub Copilot's 402 `quota_exceeded` being the verified case (see
+# orchestrator/health_probe.py) — is not the same claim as billing: nobody
+# necessarily owes money, the account is simply unusable until its quota
+# window resets (a seat-based premium-request allowance, not a balance). It
+# is kept apart from HOP_REASON_BILLING so a hop dropped for this reason can
+# be exempted from the stage's model-capability attempt budget (see
+# engine.py) without changing behaviour for the billing bucket, whose
+# counting is deliberately left as-is.
+HOP_REASON_PROVIDER_UNUSABLE = "provider_unusable"
 
 _RETRYABLE_PATTERN = re.compile(
     r"rate.?limit|quota|overloaded|too many requests|temporarily unavailable|"
@@ -27,6 +37,13 @@ _BILLING_PATTERN = re.compile(
     r"insufficient (?:balance|funds)|add credits|can only afford|payment required|billing|out of funds",
     re.IGNORECASE,
 )
+
+# GitHub Copilot's verified 402 body for a drained seat quota (see
+# orchestrator/health_probe.py REASON_QUOTA, built on the same signal). This is
+# kept apart from `_BILLING_PATTERN`: nobody owes money on a `quota_exceeded`
+# seat allowance, the account is simply unusable until the window resets, so
+# it is not the same claim a credits-out body makes.
+_PROVIDER_UNUSABLE_PATTERN = re.compile(r"quota_exceeded", re.IGNORECASE)
 
 _VARIANT_SUFFIXES = ("-thinking", "-max", "-high", "-medium", "-low", "-xhigh")
 
@@ -50,14 +67,21 @@ def status_from_message(message: str | None) -> int | None:
 
 
 def classify_failure_reason(*, status: int | None = None, error_type: str | None = None, message: str = "") -> str:
-    """Why one hop was abandoned: billing, rate_limit, transport, or semantic.
+    """Why one hop was abandoned: billing, rate_limit, transport, semantic, or
+    provider_unusable.
 
-    Billing is tested before the retryable patterns because a credit body often
-    arrives wrapped in a retryable status, and a drained account must not be
-    recorded as a transient one.
+    `provider_unusable` is tested before billing even though both can arrive on
+    a 402: GitHub Copilot's `quota_exceeded` body is a seat-quota drain, not a
+    credit balance, so it must not collapse into the billing bucket (see
+    `_PROVIDER_UNUSABLE_PATTERN`). Billing is tested before the remaining
+    retryable patterns because a credit body often arrives wrapped in a
+    retryable status, and a drained account must not be recorded as a
+    transient one.
     """
     if error_type in NON_RETRYABLE:
         return HOP_REASON_SEMANTIC
+    if _PROVIDER_UNUSABLE_PATTERN.search(message or ""):
+        return HOP_REASON_PROVIDER_UNUSABLE
     if status == 402 or _BILLING_PATTERN.search(message or ""):
         return HOP_REASON_BILLING
     if status == 429:

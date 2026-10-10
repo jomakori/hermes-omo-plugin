@@ -10,7 +10,11 @@ import dataclasses
 
 from test_engine import make_engine
 
-from orchestrator.chains import client_disconnected
+from orchestrator.chains import HOP_REASON_PROVIDER_UNUSABLE, client_disconnected
+
+# GitHub Copilot's verified 402 body for a drained seat quota (see
+# orchestrator/health_probe.py REASON_QUOTA) — distinct from a credits-out body.
+QUOTA_ERROR = 'HTTP 402: {"error":{"code":"quota_exceeded","message":"premium request allowance exhausted"}}'
 
 
 class _Failed:
@@ -228,6 +232,30 @@ def test_cancelled_work_does_not_consume_the_attempt_budget():
         # to do it — and must not burn the stage's budget.
         assert engine.dispatch(goal="same stage", target="explore")["status"] == "cancelled"
     assert launched(lifecycle) == ["cheap-model"] * 3
+
+
+def test_a_provider_unusable_walk_does_not_consume_the_attempt_budget():
+    # OMR-11: a walk that ends on a drained-quota hop (GitHub Copilot's 402
+    # `quota_exceeded`) says nothing about whether this agent/model can do
+    # the work, so repeated dispatches must not trip `max_attempts_per_agent`
+    # and refuse the stage — unlike a genuine model-capability failure (see
+    # `test_a_stage_that_keeps_failing_stops_after_the_attempt_budget`).
+    lifecycle = RecordingLifecycle(error=QUOTA_ERROR)
+    _, engine = make_engine(
+        lifecycle,
+        {"max_attempts_per_agent": 2, "chains": {"explore": ["cheap-model", "premium-model"]}},
+    )
+    outcomes = [engine.dispatch(goal="same stage", target="explore") for _ in range(5)]
+
+    assert [out["status"] for out in outcomes] == ["failed"] * 5
+    # Every dispatch walked the full chain again — the budget never engaged.
+    assert launched(lifecycle) == ["cheap-model", "premium-model"] * 5
+    for out in outcomes:
+        assert "refusing another attempt" not in out["error"]
+        assert out["hop_history"] == [
+            {"model": "cheap-model", "reason": HOP_REASON_PROVIDER_UNUSABLE},
+            {"model": "premium-model", "reason": HOP_REASON_PROVIDER_UNUSABLE},
+        ]
 
 
 # ── (c) a request whose client is gone is not re-issued ──────────────────────

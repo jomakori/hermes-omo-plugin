@@ -12,6 +12,7 @@ from test_engine import FakeLifecycle, make_engine
 
 from orchestrator.chains import (
     HOP_REASON_BILLING,
+    HOP_REASON_PROVIDER_UNUSABLE,
     HOP_REASON_RATE_LIMIT,
     HOP_REASON_SEMANTIC,
     HOP_REASON_SUCCESS,
@@ -27,6 +28,11 @@ CREDIT_ERROR = (
     "or switch to a free model. Received Model Group=deepseek-v4-pro"
 )
 BALANCE_ERROR = 'DeepseekException - {"error":{"message":"Insufficient Balance (request_id: ff87c034)"}}'
+# GitHub Copilot's verified 402 body for a drained seat quota (see
+# orchestrator/health_probe.py REASON_QUOTA) — distinct from a credits-out body.
+QUOTA_ERROR = (
+    'HTTP 402: {"error":{"code":"quota_exceeded","message":"You have exceeded your premium request allowance."}}'
+)
 # `retry_on_errors` is the status set that triggers a walk (see README); the
 # deployed chains list 402, so a drained hop is a hop-switch rather than a stop.
 WALK_CHAIN = {
@@ -78,6 +84,8 @@ class ResultLifecycle:
         ({"status": 402}, HOP_REASON_BILLING),
         ({"message": CREDIT_ERROR}, HOP_REASON_BILLING),
         ({"message": BALANCE_ERROR}, HOP_REASON_BILLING),
+        ({"status": 402, "message": QUOTA_ERROR}, HOP_REASON_PROVIDER_UNUSABLE),
+        ({"message": QUOTA_ERROR}, HOP_REASON_PROVIDER_UNUSABLE),
         ({"status": 429, "message": "rate limit exceeded"}, HOP_REASON_RATE_LIMIT),
         ({"status": 503, "message": "service unavailable"}, HOP_REASON_TRANSPORT),
         ({"error_type": "abort"}, HOP_REASON_SEMANTIC),
@@ -140,6 +148,24 @@ def test_a_primary_hop_is_recorded_as_the_exit_point():
     # No walk happened: the single entry is the exit point of the cascade.
     assert out["status"] == "succeeded"
     assert out["hop_history"] == [{"model": "deepseek-v4-flash-direct", "reason": HOP_REASON_SUCCESS}]
+
+
+def test_a_quota_exceeded_402_walks_to_the_next_hop():
+    # The behavioural claim OMR-11 exists for: GitHub Copilot's 402
+    # `quota_exceeded` body must not stop the walk or get bucketed as billing —
+    # it is a seat-quota drain, not a credit balance — and the next hop must
+    # still be tried.
+    lifecycle = ResultLifecycle([QUOTA_ERROR, ""])
+    _, engine = make_engine(lifecycle, WALK_CHAIN)
+    out = engine.dispatch(goal="scan the repo", target="explore")
+
+    assert lifecycle.launched == ["cheap-model", "premium-model"]
+    assert out["status"] == "succeeded"
+    assert out["model"] == "premium-model"
+    assert out["hop_history"] == [
+        {"model": "cheap-model", "reason": HOP_REASON_PROVIDER_UNUSABLE},
+        {"model": "premium-model", "reason": HOP_REASON_SUCCESS},
+    ]
 
 
 def test_the_walk_records_both_outcomes_in_order():
