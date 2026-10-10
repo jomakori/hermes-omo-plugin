@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-import dataclasses
 import unittest.mock as mock
-
-import pytest
 
 from jev.packs import agent_candidates
 from jev.routing import route_agent
-
 
 _VALID = {"sisyphus", "prometheus", "explore", "quick"}
 
@@ -58,7 +54,12 @@ class TestRouteAgentUnavailable:
                 route_agent(
                     state={"user_message": "scan"},
                     valid_targets=_VALID,
-                    candidates={"sisyphus": "sisyphus", "prometheus": "prometheus", "explore": "explore", "quick": "quick"},
+                    candidates={
+                        "sisyphus": "sisyphus",
+                        "prometheus": "prometheus",
+                        "explore": "explore",
+                        "quick": "quick",
+                    },
                     unavailable={"sisyphus", "prometheus"},
                     threshold=0.75,
                     base_url="https://api.typesafe.ai",
