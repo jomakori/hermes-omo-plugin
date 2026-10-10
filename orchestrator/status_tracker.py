@@ -369,7 +369,7 @@ class StatusTracker:
                     rendered["cause"] = phase.cause
                     rendered["model"] = phase.model
                     if phase.status == "current":
-                        rendered["phrase"] = cycling_phrase("run", state.phrase_index + index)
+                        rendered["phrase"] = cycling_phrase("run", state.phrase_index + index, task=run_phase.detail)
                         rendered["rotate_seconds"] = int(self.phrase_interval)
                 elif phase.name == "review":
                     rendered["reviewer"] = phase.reviewer

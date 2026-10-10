@@ -352,11 +352,43 @@ def test_activity_line_changes_when_the_tool_changes():
     assert "🔧 patch b.py" in action[0].text
 
 
-def test_activity_falls_back_to_the_canned_phrase_when_unobservable():
+def test_activity_falls_back_to_the_task_when_unobservable():
     tracker, _ = _tracker(activity_provider=lambda session, agent: None)
-    action = tracker.apply("worker_running", _created(activity_session="s1"))
-    assert "  ↳ cycling:" in action.text
-    assert action.text.splitlines()[-1].strip() != "↳"  # the line is never blank
+    action = tracker.apply("worker_running", _created(activity_session="s1", task="add auth rejection tests"))
+    assert "  ↳ cycling: task: add (3s)" in action.text
+
+
+def test_activity_falls_back_to_generic_phrase_when_task_is_missing():
+    tracker, _ = _tracker(activity_provider=lambda session, agent: None)
+    action = tracker.apply("worker_running", _created(activity_session="s1", goal="", task=""))
+    assert "  ↳ cycling: reading the code… (3s)" in action.text
+
+
+def test_activity_fallback_is_bounded_and_task_specific():
+    tracker, _ = _tracker(activity_provider=lambda session, agent: None)
+    action = tracker.apply("worker_running", _created(activity_session="s1", task="implement " + "long " * 100))
+    line = next(line for line in action.text.splitlines() if line.startswith("  ↳ cycling:"))
+    assert len(line) <= 48
+    assert "task: implement" in line
+
+
+def test_activity_fallback_keeps_a_bounded_unbroken_task_token():
+    tracker, _ = _tracker(activity_provider=lambda session, agent: None)
+    action = tracker.apply("worker_running", _created(activity_session="s1", task="x" * 100))
+    line = next(line for line in action.text.splitlines() if line.startswith("  ↳ cycling:"))
+    assert len(line) <= 48
+    assert line.startswith("  ↳ cycling: task: " + "x" * 23)
+
+
+def test_activity_fallback_rotates_even_for_one_word_tasks():
+    tracker, clock = _tracker(activity_provider=lambda session, agent: None)
+    first = tracker.apply("worker_running", _created(activity_session="s1", task="refactor"))
+    assert "cycling: task: refactor" in first.text
+    tracker.note_message_id("omo_1", "1")
+    clock.advance(DEFAULT_PHRASE_INTERVAL + 0.1)
+    rotated = tracker.tick()
+    assert len(rotated) == 1
+    assert "cycling: working: refactor" in rotated[0].text
 
 
 # ── T5 model + hop on the live rows ───────────────────────────────────────────

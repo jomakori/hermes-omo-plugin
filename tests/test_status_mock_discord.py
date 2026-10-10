@@ -340,7 +340,7 @@ def test_small_run_shape_and_line_count():
         "",
         "fix the bug · hephaestus · Deep Agent",
         "- run 🔁 omo_1 · minimax-m3",
-        "  ↳ cycling: reading the code… (3s)",
+        "  ↳ cycling: task: fix (3s)",
     ]
     assert len(running.splitlines()) == 5
 
