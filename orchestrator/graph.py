@@ -99,6 +99,10 @@ class TaskGraph:
                     "agent": agent_name,
                     "category": category,
                     "prompt": prompt,
+                    # Optional, caller-declared: the work's own short name, shown
+                    # as `TICKET · title` on the live status message instead of a
+                    # fragment derived from the raw prompt.
+                    "title": str(raw.get("title") or "").strip(),
                     "depends_on": [str(d) for d in deps],
                     "parent_id": str(raw.get("parent_id") or ""),
                 }
@@ -152,6 +156,7 @@ class TaskGraph:
                 agent_name=name,
                 task=task["prompt"],
                 chain=chain,
+                title=task["title"],
                 model=chain[0] if chain else None,
                 task_id=task["id"],
                 depends_on=tuple(task["depends_on"]),
@@ -173,6 +178,7 @@ class TaskGraph:
                         "agent": w.agent_name,
                         "task_id": w.task_id,
                         "task": w.task,
+                        "title": w.title,
                         "display": (AGENTS[w.agent_name].display if w.agent_name in AGENTS else w.agent_name),
                     }
                     for w in run.workers
@@ -256,6 +262,7 @@ class TaskGraph:
             "agent": worker.agent_name,
             "task_id": worker.task_id,
             "task": worker.task,
+            "title": worker.title,
             "run_ref": worker.task_id or run.run_id,
             "status": worker.status,
             "display": spec.display if spec is not None else worker.agent_name,

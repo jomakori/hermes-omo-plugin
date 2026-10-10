@@ -33,6 +33,13 @@ OMO_TASK_SCHEMA: dict[str, Any] = {
                 "description": "Category spawn: quick, deep, ultrabrain, visual-engineering, writing.",
             },
             "prompt": {"type": "string", "description": "The subtask, with context and success criteria."},
+            "title": {
+                "type": "string",
+                "description": (
+                    "Optional short name for the work (a few words). Shown on the live status "
+                    "message instead of a fragment derived from the prompt."
+                ),
+            },
             "context": {"type": "string", "description": "Optional additional context."},
             "background": {"type": "boolean", "description": "Run without blocking."},
         },
@@ -58,6 +65,7 @@ def make_omo_task_handler(engine: Any) -> Callable[..., Any]:
                 category=category,
                 context=params.get("context"),
                 background=bool(params.get("background", False)),
+                title=params.get("title"),
             )
         )
 

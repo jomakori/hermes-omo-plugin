@@ -68,8 +68,12 @@ def test_identical_render_is_a_no_op():
     tracker, clock = _tracker()
     tracker.apply("worker_running", _created())
     tracker.note_message_id("omo_1", "1")
-    clock.advance(10)
+    # Same event, same clock: the render is byte-identical, so no edit.
     assert tracker.apply("worker_running", _created()) is None
+    # The elapsed time is part of the live render, so time alone is a change:
+    # the message must visibly live between real transitions.
+    clock.advance(10)
+    assert tracker.apply("worker_running", _created()) is not None
 
 
 def test_edits_are_throttled_then_flushed_by_tick():
@@ -249,7 +253,7 @@ def test_single_dispatch_without_run_created_still_names_the_goal():
     assert action.kind == "post"
     assert action.text.splitlines()[0] == "🏗️ omo · omo_1 — fix the bug"
     assert "fix the bug · hephaestus · Deep Agent" in action.text
-    assert "- run 🔁 omo_1" in action.text
+    assert "- run 🔁 fix the bug" in action.text
 
 
 def test_adopted_message_id_edits_instead_of_posting():
@@ -355,7 +359,7 @@ def test_activity_line_changes_when_the_tool_changes():
 def test_activity_falls_back_to_the_task_when_unobservable():
     tracker, _ = _tracker(activity_provider=lambda session, agent: None)
     action = tracker.apply("worker_running", _created(activity_session="s1", task="add auth rejection tests"))
-    assert "  ↳ cycling: task: add (3s)" in action.text
+    assert "  ↳ cycling: reading the code: add auth (3s)" in action.text
 
 
 def test_activity_falls_back_to_generic_phrase_when_task_is_missing():
@@ -369,7 +373,7 @@ def test_activity_fallback_is_bounded_and_task_specific():
     action = tracker.apply("worker_running", _created(activity_session="s1", task="implement " + "long " * 100))
     line = next(line for line in action.text.splitlines() if line.startswith("  ↳ cycling:"))
     assert len(line) <= 48
-    assert "task: implement" in line
+    assert line.startswith("  ↳ cycling: reading the code: implement")
 
 
 def test_activity_fallback_keeps_a_bounded_unbroken_task_token():
@@ -377,18 +381,20 @@ def test_activity_fallback_keeps_a_bounded_unbroken_task_token():
     action = tracker.apply("worker_running", _created(activity_session="s1", task="x" * 100))
     line = next(line for line in action.text.splitlines() if line.startswith("  ↳ cycling:"))
     assert len(line) <= 48
-    assert line.startswith("  ↳ cycling: task: " + "x" * 23)
+    # A phrase is cut on a word boundary: an unbreakable body is dropped whole
+    # rather than sliced mid-token into the phrase.
+    assert line.startswith("  ↳ cycling: reading the code:")
 
 
 def test_activity_fallback_rotates_even_for_one_word_tasks():
     tracker, clock = _tracker(activity_provider=lambda session, agent: None)
     first = tracker.apply("worker_running", _created(activity_session="s1", task="refactor"))
-    assert "cycling: task: refactor" in first.text
+    assert "cycling: reading the code: refactor" in first.text
     tracker.note_message_id("omo_1", "1")
     clock.advance(DEFAULT_PHRASE_INTERVAL + 0.1)
     rotated = tracker.tick()
     assert len(rotated) == 1
-    assert "cycling: working: refactor" in rotated[0].text
+    assert "cycling: patching the working tree" in rotated[0].text
 
 
 # ── T5 model + hop on the live rows ───────────────────────────────────────────
@@ -397,13 +403,13 @@ def test_activity_fallback_rotates_even_for_one_word_tasks():
 def test_serving_model_rides_the_run_row():
     tracker, _ = _tracker()
     action = tracker.apply("worker_running", {**_created(), "model": "minimax-m3"})
-    assert "- run 🔁 omo_1 · minimax-m3" in action.text
+    assert "- run 🔁 add live status · minimax-m3" in action.text
 
 
 def test_fallback_hop_shares_the_activity_line():
     tracker, _ = _tracker()
     action = tracker.apply("worker_running", {**_created(), "hop": "claude-sonnet-5 (rate limit)"})
-    assert "- run 🔁 omo_1" in action.text  # the model/hop do not pollute the run row
+    assert "- run 🔁 add live status" in action.text  # the model/hop do not pollute the run row
     assert "⤵ claude-sonnet-5 (rate limit)" in action.text
     assert action.text.splitlines()[-1].count("⤵") == 1
 
