@@ -139,7 +139,7 @@ def test_a_primary_hop_is_recorded_as_the_exit_point():
 
     # No walk happened: the single entry is the exit point of the cascade.
     assert out["status"] == "succeeded"
-    assert out["hop_history"] == [{"model": "deepseek-v4-flash", "reason": HOP_REASON_SUCCESS}]
+    assert out["hop_history"] == [{"model": "deepseek-v4-flash-direct", "reason": HOP_REASON_SUCCESS}]
 
 
 def test_the_walk_records_both_outcomes_in_order():

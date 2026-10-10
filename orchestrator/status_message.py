@@ -28,7 +28,7 @@ of the goal::
                 "phases": [
                     {"name": "dispatch", "status": "done"},
                     {"name": "run", "status": "current", "task_id": "t4",
-                     "model": "minimax-m3", "phrase": "patching components/shell.rs…"},
+                     "model": "copilot-luna", "phrase": "patching components/shell.rs…"},
                     {"name": "review", "status": "reviewing", "reviewer": "momus",
                      "task_id": "t14:review"},
                 ],

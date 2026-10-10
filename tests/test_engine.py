@@ -91,9 +91,9 @@ def test_dispatch_sync_succeeds_on_primary():
     ctx, engine = make_engine(lifecycle)
     out = engine.dispatch(goal="scan the repo", target="explore")
     assert out["status"] == "succeeded"
-    assert lifecycle.launches == ["deepseek-v4-flash"]
-    assert out["model"] == "deepseek-v4-flash"
-    assert out["result"] == {"summary": "done", "model": "deepseek-v4-flash"}
+    assert lifecycle.launches == ["deepseek-v4-flash-direct"]
+    assert out["model"] == "deepseek-v4-flash-direct"
+    assert out["result"] == {"summary": "done", "model": "deepseek-v4-flash-direct"}
 
 
 def test_dispatch_falls_back_on_retryable_error():
@@ -101,8 +101,8 @@ def test_dispatch_falls_back_on_retryable_error():
     ctx, engine = make_engine(lifecycle)
     out = engine.dispatch(goal="scan the repo", target="explore")
     assert out["status"] == "succeeded"
-    assert lifecycle.launches == ["deepseek-v4-flash", "minimax-m3"]
-    assert out["model"] == "minimax-m3"
+    assert lifecycle.launches == ["deepseek-v4-flash-direct", "copilot-luna"]
+    assert out["model"] == "copilot-luna"
 
 
 def test_dispatch_exhausts_chain_then_fails():
@@ -135,7 +135,7 @@ def test_category_dispatch_targets_junior_with_category_chain():
     _, engine = make_engine(lifecycle)
     out = engine.dispatch(goal="tiny fix", category="quick")
     assert out["agent"].startswith("sisyphus-junior")
-    assert out["model"] == "deepseek-v4-flash"
+    assert out["model"] == "deepseek-v4-flash-direct"
 
 
 def test_guard_rejections_propagate():
