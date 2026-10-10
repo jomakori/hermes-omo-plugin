@@ -21,6 +21,15 @@ transport therefore exposes :attr:`GatewayStatusTransport.loop` so the notifier
 can schedule delivery onto the gateway loop (see ``status_notifier._await``)
 rather than call ``asyncio.run`` off-loop.
 
+Besides ``send`` / ``edit_message`` / ``delete_message`` it exposes ``pin`` and
+``unpin``: the live struct is pinned once it lands, and unpinned only when the
+run ends with every worker succeeded. Both reach the platform client the adapter
+owns (a public accessor when it has one, else its private ``_client`` — a
+coupling that is documented and fails safe to a logged no-op if the host renames
+it), resolve the channel exactly as the post did, and take the message through
+``channel.get_partial_message(id)``. Discord is the only platform this supports;
+a platform without the capability degrades to a no-op.
+
 Everything here is best-effort: a run must never fail because its progress
 message could not be delivered. The whole module is import-guarded so the plugin
 still loads where the gateway package is absent (CLI, unit tests).
@@ -37,6 +46,13 @@ logger = logging.getLogger(__name__)
 # deleted message produces. A gone message means "post a fresh one"; any other
 # failure is transient and keeps the id.
 _GONE_MARKERS = ("10008", "unknown message", "not found", "no longer exists")
+
+# Discord's pin limit (error code 30001, "Maximum number of pins reached"). It is
+# the one pin failure we act on: the caller evicts its own oldest pin and retries.
+_PIN_LIMIT_MARKERS = ("30001", "maximum number of pins", "pin limit")
+# A refusal (403 / 50013 "Missing Permissions", "Cannot execute action on a
+# system message") is permanent: log it loudly and stop, rather than retry.
+_PIN_REFUSED_MARKERS = ("50013", "403", "missing permissions", "missing access", "forbidden", "manage messages")
 
 __all__ = ["GatewayStatusTransport", "gateway_runner"]
 
@@ -87,6 +103,9 @@ class GatewayStatusTransport:
         # Set by the last edit: True when the target message is gone (post anew),
         # False when the failure was transient (keep editing the same id).
         self.last_gone = False
+        # Set by the last pin: True when Discord refused it because the channel's
+        # pin cap is reached (30001), so the caller knows to evict and retry.
+        self.last_pin_limit = False
 
     @property
     def usable(self) -> bool:
@@ -208,6 +227,140 @@ class GatewayStatusTransport:
         except Exception as exc:
             logger.debug("OMO status delete failed for %s: %s", run_key, exc)
             return False
+
+    async def pin(self, run_key: str, message_id: str) -> bool:
+        """Pin the live struct; False when it could not be pinned.
+
+        Follows the same best-effort shape as ``post`` / ``edit`` / ``delete``:
+        resolve the adapter, reach the message, ``await message.pin()``. A pin
+        refused because the channel's pin cap is full (30001) sets
+        :attr:`last_pin_limit` so the caller can evict its own oldest pin and
+        retry once; a permission refusal (403 / 50013) is logged as a warning and
+        never retried. Any other failure is debug-logged as transient.
+        """
+        self.last_pin_limit = False
+        message = await self._partial_message(message_id)
+        if message is None:
+            return False
+        try:
+            await message.pin()
+        except Exception as exc:
+            self.last_pin_limit = _looks_pin_limit(exc)
+            if self.last_pin_limit:
+                logger.warning("OMO status pin hit the pin limit for %s: %s", run_key, _error_text(exc))
+            elif _looks_pin_refused(exc):
+                logger.warning("OMO status pin refused for %s (needs Manage Messages): %s", run_key, _error_text(exc))
+            else:
+                logger.debug("OMO status pin failed for %s: %s", run_key, exc)
+            return False
+        return True
+
+    async def unpin(self, run_key: str, message_id: str) -> bool:
+        """Unpin the run's struct; False when it could not be unpinned.
+
+        Best-effort and quiet, like ``delete``: a message already unpinned, an
+        adapter without the capability, or a transient network error all leave
+        the caller's bookkeeping to decide whether to try again.
+        """
+        message = await self._partial_message(message_id)
+        if message is None:
+            return False
+        try:
+            await message.unpin()
+        except Exception as exc:
+            logger.debug("OMO status unpin failed for %s: %s", run_key, exc)
+            return False
+        return True
+
+    async def _partial_message(self, message_id: str) -> Any:
+        """The partial message object for the channel the post used, or None.
+
+        Resolution mirrors the post exactly: the thread when the route has one,
+        else the chat. ``get_channel`` first (cache), ``fetch_channel`` on miss
+        (REST) — the same pair the adapter's own ``_resolve_channel`` uses.
+        """
+        if not message_id:
+            return None
+        adapter = self._adapter()
+        if adapter is None:
+            return None
+        client = _adapter_client(adapter)
+        if client is None:
+            return None
+        channel = await self._channel(client)
+        if channel is None:
+            return None
+        partial = getattr(channel, "get_partial_message", None)
+        if not callable(partial):
+            return None
+        try:
+            return partial(int(message_id))
+        except Exception:
+            return None
+
+    async def _channel(self, client: Any) -> Any:
+        target = self._target
+        if not target:
+            return None
+        try:
+            channel_id = int(target)
+        except (TypeError, ValueError):
+            return None
+        get_channel: Any = getattr(client, "get_channel", None)
+        channel = None
+        if callable(get_channel):
+            try:
+                channel = get_channel(channel_id)
+            except Exception:
+                channel = None
+        if channel is not None:
+            return channel
+        fetch_channel: Any = getattr(client, "fetch_channel", None)
+        if not callable(fetch_channel):
+            return None
+        try:
+            return await fetch_channel(channel_id)
+        except Exception:
+            return None
+
+
+def _adapter_client(adapter: Any) -> Any:
+    """The platform client the adapter owns, or None.
+
+    A public accessor is preferred when the host exposes one; otherwise the
+    private ``_client`` attribute is used. That private coupling is deliberate
+    and documented: the adapter exposes no public client, and a host rename makes
+    this fail safe — ``getattr`` returns None and pinning degrades to a logged
+    no-op rather than raising.
+    """
+    for name in ("get_client", "client", "bot"):
+        value = getattr(adapter, name, None)
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                value = None
+        if value is not None:
+            return value
+    return getattr(adapter, "_client", None)
+
+
+def _error_text(exc: Exception) -> str:
+    """The code, status and message of a platform exception, for the log line."""
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "status", None)
+    parts = [str(part) for part in (code, status, exc) if part is not None]
+    return " ".join(parts)
+
+
+def _looks_pin_limit(exc: Any) -> bool:
+    text = _error_text(exc).lower() if isinstance(exc, Exception) else str(exc).lower()
+    return any(marker in text for marker in _PIN_LIMIT_MARKERS)
+
+
+def _looks_pin_refused(exc: Any) -> bool:
+    text = _error_text(exc).lower() if isinstance(exc, Exception) else str(exc).lower()
+    return any(marker in text for marker in _PIN_REFUSED_MARKERS)
 
 
 def _looks_gone(error: Any) -> bool:

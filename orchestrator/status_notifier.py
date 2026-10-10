@@ -10,7 +10,9 @@
 * the same worker wakes on a timer to rotate the in-progress phrase
   (``tick_seconds``), keeping the message visibly alive;
 * message ids are written back onto the run record via the engine, so a gateway
-  restart adopts the same message and keeps editing it.
+  restart adopts the same message and keeps editing it;
+* the live struct is pinned once it lands and released exactly once, when the run
+  ends with every worker succeeded — any other outcome leaves it pinned.
 
 Everything the worker does is best-effort. A status message is a courtesy: a
 failure to post or edit must never fail the run it describes.
@@ -164,11 +166,18 @@ class StatusNotifier:
         # delivery onto it (a fresh loop off-thread is exactly what loses it).
         loop = getattr(transport, "loop", None)
         try:
+            if action.kind == "unpin":
+                # A terminal success whose render did not change: there is nothing
+                # to edit, only the pin to release.
+                self._unpin(transport, action.run_key, action.message_id, loop)
+                return
             if action.kind == "post":
                 message_id = _await(transport.post(action.run_key, action.text), loop)
                 if message_id:
                     self._tracker.note_message_id(action.run_key, str(message_id))
                     self._record(action.run_key, str(message_id))
+                    if action.pin:
+                        self._pin(transport, action.run_key, str(message_id), loop)
                 return
             if action.kind == "move":
                 # The struct follows the conversation: post the fresh copy below,
@@ -180,6 +189,13 @@ class StatusNotifier:
                     self._delete(transport, action.run_key, action.message_id, loop)
                     self._tracker.note_message_id(action.run_key, str(message_id))
                     self._record(action.run_key, str(message_id))
+                    # Pins follow the struct: release the previous copy's pin and
+                    # pin the fresh one. Release first so the record still names
+                    # the old pin when it is cleared, then pin the new id.
+                    if action.pin and action.message_id:
+                        self._unpin(transport, action.run_key, action.message_id, loop)
+                    if action.pin:
+                        self._pin(transport, action.run_key, str(message_id), loop)
                 return
             ok = _await(transport.edit(action.run_key, str(action.message_id), action.text), loop)
             if not ok and getattr(transport, "last_gone", False):
@@ -187,6 +203,10 @@ class StatusNotifier:
                 # forget the id so the next transition posts a fresh one.
                 self._tracker.note_message_id(action.run_key, None)
                 self._record(action.run_key, None)
+            if action.unpin:
+                # Unpin regardless of the edit's fate: the run ended successfully,
+                # so the pin should not outlive it even if the final edit was lost.
+                self._unpin(transport, action.run_key, action.message_id, loop)
         except Exception:  # pragma: no cover - best effort by contract
             logger.debug("OMO status delivery failed for %s", action.run_key, exc_info=True)
 
@@ -207,6 +227,73 @@ class StatusNotifier:
         except Exception:  # pragma: no cover - best effort by contract
             logger.debug("OMO status delete declined for %s (%s)", run_key, message_id, exc_info=True)
 
+    def _pin(self, transport: Any, run_key: str, message_id: str, loop: Any) -> None:
+        """Pin the struct, evicting our oldest pin and retrying once on the cap.
+
+        Best-effort: a platform without a pin API, or any failure other than the
+        pin cap, simply leaves the struct unpinned. On the cap (30001) we release
+        the oldest pin *we own* — read off the run records, never a pin belonging
+        to someone else — and try exactly one more time.
+        """
+        pin = getattr(transport, "pin", None)
+        if not callable(pin) or not message_id:
+            return
+        try:
+            ok = _await(pin(run_key, str(message_id)), loop)
+        except Exception:  # pragma: no cover - best effort by contract
+            logger.debug("OMO status pin declined for %s", run_key, exc_info=True)
+            return
+        if ok:
+            self._record_pin(run_key, str(message_id))
+            return
+        if not getattr(transport, "last_pin_limit", False):
+            return
+        self._evict_oldest_pin(run_key, loop)
+        try:
+            ok = _await(pin(run_key, str(message_id)), loop)
+        except Exception:  # pragma: no cover - best effort by contract
+            logger.debug("OMO status pin retry declined for %s", run_key, exc_info=True)
+            return
+        if ok:
+            self._record_pin(run_key, str(message_id))
+
+    def _evict_oldest_pin(self, keep_run_key: str, loop: Any) -> None:
+        """Release the oldest pin this plugin owns, to make room for a new one.
+
+        Only pins recorded on our own runs are ever touched: the oldest such run
+        (excluding the one we are pinning) is unpinned through its own transport,
+        so the right channel is used across runs.
+        """
+        getter = getattr(self._engine, "oldest_status_pin", None)
+        if not callable(getter):
+            return
+        try:
+            found: Any = getter(keep_run_key)
+        except Exception:
+            return
+        if not found:
+            return
+        other_run, pinned_id = found
+        other = self._transport(str(other_run))
+        if other is None:
+            return
+        self._unpin(other, str(other_run), pinned_id, loop)
+
+    def _unpin(self, transport: Any, run_key: str, message_id: str | None, loop: Any) -> None:
+        """Release the struct's pin; best-effort, never fatal."""
+        if not message_id:
+            return
+        unpin = getattr(transport, "unpin", None)
+        if not callable(unpin):
+            return
+        try:
+            ok = _await(unpin(run_key, str(message_id)), loop)
+        except Exception:  # pragma: no cover - best effort by contract
+            logger.debug("OMO status unpin declined for %s", run_key, exc_info=True)
+            return
+        if ok:
+            self._clear_pin(run_key, str(message_id))
+
     def _record(self, run_key: str, message_id: str | None) -> None:
         setter = getattr(self._engine, "note_status_message", None)
         if not callable(setter):
@@ -215,6 +302,25 @@ class StatusNotifier:
             setter(run_key, message_id)
         except Exception:
             logger.debug("OMO status id persist failed for %s", run_key, exc_info=True)
+
+    def _record_pin(self, run_key: str, message_id: str) -> None:
+        setter = getattr(self._engine, "note_status_pin", None)
+        if not callable(setter):
+            return
+        try:
+            setter(run_key, message_id)
+        except Exception:
+            logger.debug("OMO status pin persist failed for %s", run_key, exc_info=True)
+
+    def _clear_pin(self, run_key: str, message_id: str) -> None:
+        """Forget a pin only when the record still names this exact message."""
+        clearer = getattr(self._engine, "clear_status_pin", None)
+        if not callable(clearer):
+            return
+        try:
+            clearer(run_key, message_id)
+        except Exception:
+            logger.debug("OMO status pin clear failed for %s", run_key, exc_info=True)
 
 
 def _await(value: Any, loop: Any = None) -> Any:

@@ -85,6 +85,10 @@ def _status_notifier(ctx: Any, engine: OmoEngine) -> StatusNotifier | None:
         min_edit_interval=_config_number(ctx, "status_edit_interval", DEFAULT_MIN_EDIT_INTERVAL),
         phrase_interval=_config_number(ctx, "status_phrase_interval", DEFAULT_PHRASE_INTERVAL),
         move_interval=_config_number(ctx, "status_move_interval", DEFAULT_MOVE_INTERVAL),
+        # Pin the live struct while the run is live, and release it only when the
+        # run ends with every worker succeeded. On by default; `status_pin_message`
+        # off means neither the pin nor its matching unpin is ever emitted.
+        pin_message=_config_flag(ctx, "status_pin_message", True),
         # The activity line reads the worker's own profile DB; injected so the
         # tracker stays pure and unit-testable without a filesystem.
         activity_provider=make_activity_provider(profiles_dir=ctx.get_config("activity_profiles_dir", None)),
