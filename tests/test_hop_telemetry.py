@@ -30,7 +30,10 @@ CREDIT_ERROR = (
 BALANCE_ERROR = 'DeepseekException - {"error":{"message":"Insufficient Balance (request_id: ff87c034)"}}'
 # GitHub Copilot's verified 402 body for a drained seat quota (see
 # orchestrator/health_probe.py REASON_QUOTA) — distinct from a credits-out body.
-QUOTA_ERROR = 'HTTP 402: {"error":{"code":"quota_exceeded","message":"You have exceeded your premium request allowance."}}'
+QUOTA_ERROR = (
+    'HTTP 402: {"error":{"code":"quota_exceeded",'
+    '"message":"You have exceeded your premium request allowance."}}'
+)
 # `retry_on_errors` is the status set that triggers a walk (see README); the
 # deployed chains list 402, so a drained hop is a hop-switch rather than a stop.
 WALK_CHAIN = {
