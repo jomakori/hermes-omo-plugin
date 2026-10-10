@@ -123,6 +123,8 @@ class ShadowLogger:
         latency_ms: float,
         model: str,
         status: str,
+        dispatch_id: str = "",
+        source: str = "",
     ) -> bool:
         """Append one record. Returns True on write, False on any failure."""
         entry: dict[str, Any] = {
@@ -137,8 +139,43 @@ class ShadowLogger:
             "latency_ms": float(latency_ms),
             "model": model,
             "status": status,
+            # Who chose this dispatch (`jev` when routing ran, else the caller) and
+            # which dispatch it was, so the outcome record can join back to it.
+            "dispatch_id": str(dispatch_id),
+            "source": str(source),
         }
         return self.write(entry)
+
+    def outcome(
+        self,
+        *,
+        dispatch_id: str,
+        delivered: bool,
+        status: str = "",
+        agent: str = "",
+        caller_decision: str = "",
+        source: str = "",
+    ) -> bool:
+        """Append what a dispatch actually produced, joining it to its shadow row.
+
+        A shadow record is written before the work exists, so on its own it can
+        only say what Jev expected. This is the other half. Agreement against the
+        caller measures conformity to the caller's own pick; joining these two on
+        ``dispatch_id`` is what makes the report score a routing source against
+        delivery instead.
+        """
+        return self.write(
+            {
+                "_type": "outcome",
+                "ts": utc_now(),
+                "dispatch_id": str(dispatch_id),
+                "delivered": bool(delivered),
+                "status": str(status),
+                "agent": str(agent),
+                "caller_decision": str(caller_decision),
+                "source": str(source),
+            }
+        )
 
     def write(self, entry: dict[str, Any]) -> bool:
         """Append a pre-built record. Best-effort: never raises."""
@@ -183,6 +220,8 @@ def run_shadow_pack(
     model: str,
     logger: ShadowLogger,
     thresholds: dict[str, float] | None = None,
+    dispatch_id: str = "",
+    source: str = "",
 ) -> None:
     """Ask Jev one pack and append the shadow record. Never raises.
 
@@ -206,6 +245,8 @@ def run_shadow_pack(
                 latency_ms=latency_ms,
                 model=model,
                 status="unavailable",
+                dispatch_id=dispatch_id,
+                source=source,
             )
             return
         decisions = apply_policy(
@@ -224,6 +265,8 @@ def run_shadow_pack(
             latency_ms=latency_ms,
             model=str(response.get("model", model)),
             status="ok",
+            dispatch_id=dispatch_id,
+            source=source,
         )
     except Exception:
         return
@@ -240,6 +283,8 @@ def run_shadow(
     timeout_s: float = 10.0,
     api_key_env: str = "TYPESAFE_AI_API_KEY",
     thresholds: dict[str, float] | None = None,
+    dispatch_id: str = "",
+    source: str = "",
 ) -> None:
     """Run every configured shadow pack and append one record each. Never raises.
 
@@ -263,6 +308,8 @@ def run_shadow(
                     latency_ms=0.0,
                     model=model,
                     status="unavailable",
+                    dispatch_id=dispatch_id,
+                    source=source,
                 )
             return
         client = JevClient(base_url=base_url, api_key=api_key, timeout_s=float(timeout_s))
@@ -275,6 +322,8 @@ def run_shadow(
                 model=model,
                 logger=logger,
                 thresholds=thresholds,
+                dispatch_id=dispatch_id,
+                source=source,
             )
     except Exception:
         return

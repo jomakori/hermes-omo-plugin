@@ -119,6 +119,9 @@ class OmoEngine:
         self._persist_lock = threading.Lock()
         self.chains: Any = None
         self.runs: dict[str, Run] = {}
+        # The shadow dispatch id per run, so the outcome written when a worker
+        # finishes can join back to the row written when it started.
+        self._dispatch_ids: dict[str, str] = {}
         # The live status notifier, attached by the plugin entry point. Optional:
         # every progress emit is a no-op without it.
         self._status: Any = None
@@ -271,12 +274,9 @@ class OmoEngine:
         background: bool = False,
         parent_agent: str | None = None,
     ) -> dict[str, Any]:
-        name, chain = self._resolve_dispatch_target(
+        name, chain, routed_by = self._resolve_dispatch_target(
             goal=goal, target=target, category=category, parent_agent=parent_agent
         )
-        # Observation only: Jev runs beside the resolved decision and never feeds
-        # back into it. The record is the engine's own answer, not a route choice.
-        self._shadow_dispatch(goal=goal, caller_decision=category or name)
         chain = tuple(self._normalize_model(model) or model for model in chain)
         run_id = f"omo_{uuid.uuid4().hex[:8]}"
         # Stamp the run with the session that is paying for it, so a later read or
@@ -284,6 +284,17 @@ class OmoEngine:
         run = Run(run_id=run_id, goal=goal, session_id=session.current_session_id())
         worker = Worker(run_id=run_id, agent_name=name, task=goal, chain=chain, model=chain[0] if chain else None)
         run.workers.append(worker)
+        # Observation only: Jev runs beside the resolved decision and never feeds
+        # back into it. Written once the run exists, so the outcome recorded when
+        # the worker finishes can join back to the row written here.
+        dispatch_id = uuid.uuid4().hex[:8]
+        self._dispatch_ids[run_id] = dispatch_id
+        self._shadow_dispatch(
+            goal=goal,
+            caller_decision=category or name,
+            dispatch_id=dispatch_id,
+            source=routed_by,
+        )
         # Remember where the session's replies land before leaving the caller's
         # turn: the worker thread that reports progress has no ContextVars.
         session.apply_route(run, session.current_route())
@@ -319,32 +330,48 @@ class OmoEngine:
 
     def _resolve_dispatch_target(
         self, *, goal: str, target: str | None, category: str | None, parent_agent: str | None
-    ) -> tuple[str, tuple[str, ...]]:
-        """Resolve the dispatch target, optionally letting Jev pick when no explicit choice was given.
+    ) -> tuple[str, tuple[str, ...], str]:
+        """Resolve the dispatch target and who chose it: Jev's pick or the caller's.
 
-        Default OFF: with ``jev_routing_enabled`` unset this is exactly
-        ``_resolve_target`` and behaviour is unchanged. When on, the deterministic
-        floor still wins — an explicit ``agent=``/``category=`` is never
-        second-guessed and Jev is not consulted. Jev only fills the
-        otherwise-unroutable no-explicit case, and any rejection falls back to the
-        static resolution unchanged.
+        ``target="auto"`` asks for a routed choice on purpose — the caller has no
+        specialist in mind and wants Jev's — and works without the global flag. The
+        flag (``jev_routing_enabled``) instead covers the unnamed dispatch, and an
+        explicit ``agent=``/``category=`` is never second-guessed: a caller that named
+        one has already decided, which is why routing only ever fills the
+        otherwise-unroutable case. A pick that does not clear ``jev_routing_threshold``
+        is not acted on, and every outcome is announced so a lane is never routed on a
+        fit nobody was sure about.
         """
-        if not bool(self._config("jev_routing_enabled", False)):
-            return self._resolve_target(target=target, category=category, parent_agent=parent_agent)
-        if target is not None or category is not None:
+        wants_auto = str(target or "").strip().lower() == "auto" or str(category or "").strip().lower() == "auto"
+        if wants_auto:
+            target = None
+            category = None
+        if not wants_auto and not bool(self._config("jev_routing_enabled", False)):
+            name, chain = self._resolve_target(target=target, category=category, parent_agent=parent_agent)
+            return name, chain, "caller"
+        if not wants_auto and (target is not None or category is not None):
             name, chain = self._resolve_target(target=target, category=category, parent_agent=parent_agent)
             self._emit_route("static", 0.0, name, "explicit")
-            return name, chain
+            return name, chain, "caller"
         pick, confidence, status = self._jev_pick(goal)
         if pick is not None:
             try:
                 name, chain = self._resolve_target(target=pick, category=None, parent_agent=parent_agent)
-                self._emit_route("jev", confidence, name, status)
-                return name, chain
             except Exception:
                 pass
-        self._emit_route("static", confidence, None, status)
-        return self._resolve_target(target=target, category=category, parent_agent=parent_agent)
+            else:
+                self._emit_route("jev", confidence, name, status)
+                return name, chain, "jev"
+        # No pick to act on. A dispatch on an unconfident fit is the shape that burns
+        # a worker for its whole budget, so the caller is told what Jev saw instead of
+        # hearing the same silence it would hear with no Jev at all. `auto` has now
+        # spent its one way of naming a target, so it fails the way an unnamed
+        # dispatch always has rather than inventing one.
+        self._emit_route("jev-low-confidence" if status == "ok" else "jev-unavailable", confidence, None, status)
+        if wants_auto:
+            raise GuardError("No confident pick for this task: name an agent= or category= instead of 'auto'.")
+        name, chain = self._resolve_target(target=target, category=category, parent_agent=parent_agent)
+        return name, chain, "caller"
 
     def _jev_pick(self, goal: str) -> tuple[str | None, float, str]:
         """One synchronous, bounded ``pick_agent`` call for authoritative routing.
@@ -383,7 +410,7 @@ class OmoEngine:
         except Exception:
             pass
 
-    def _shadow_dispatch(self, *, goal: str, caller_decision: str) -> None:
+    def _shadow_dispatch(self, *, goal: str, caller_decision: str, dispatch_id: str = "", source: str = "") -> None:
         """Observe Jev's routing verdict beside the engine's, off the hot path.
 
         Fire-and-forget: a daemon thread runs the shadow packs so neither the
@@ -408,6 +435,8 @@ class OmoEngine:
                     "packs": packs,
                     "state": {"user_message": goal},
                     "caller_decision": caller_decision,
+                    "dispatch_id": dispatch_id,
+                    "source": source,
                     "path": self._config("jev_shadow_path", "~/.omo/jev-shadow.jsonl"),
                     "base_url": self._config("jev_base_url", "https://api.typesafe.ai"),
                     "model": self._config("jev_model", "jev-latest"),
@@ -817,9 +846,36 @@ class OmoEngine:
     def _timeout_seconds(self) -> float:
         return float(self._config("worker_timeout_seconds", 1800))
 
+    def _record_outcome(self, worker: Worker, *, delivered: bool) -> None:
+        """Close the shadow pair for a finished worker with what it actually produced.
+
+        Only a verdict on the work is recorded — SUCCEEDED or FAILED. A cancel or an
+        interrupted run says something about the caller or the gateway, not about
+        whether the routing source was right, and counting those would score a source
+        for someone else's behaviour. Best-effort: never raises, like every other
+        shadow write, so a bad path cannot cost the outcome it is describing.
+        """
+        dispatch_id = self._dispatch_ids.pop(worker.run_id, "")
+        if not dispatch_id or worker.status not in (SUCCEEDED, FAILED):
+            return
+        try:
+            if not self._config("jev_shadow_enabled", False):
+                return
+            from jev.shadow import ShadowLogger  # noqa: PLC0415 - observation only
+
+            ShadowLogger(self._config("jev_shadow_path", "~/.omo/jev-shadow.jsonl")).outcome(
+                dispatch_id=dispatch_id,
+                delivered=delivered,
+                status=worker.status,
+                agent=worker.agent_name,
+            )
+        except Exception:
+            return
+
     def _outcome(self, run: Run, worker: Worker) -> dict[str, Any]:
         # Every terminal transition of a worker funnels through here, so this is the
         # one checkpoint that matters: what the record says the worker got to.
+        self._record_outcome(worker, delivered=worker.status == SUCCEEDED)
         self._persist()
         return {
             "run_id": run.run_id,

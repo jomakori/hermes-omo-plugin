@@ -57,7 +57,8 @@ OMO_SCHEMA: dict[str, Any] = {
                     "Target agent (explore, librarian, oracle, hephaestus, prometheus, "
                     "atlas, metis, momus, sisyphus, multimodal-looker, tester, debugger, "
                     "security) or a role name (explorer, researcher, planner, implementer, "
-                    "tester, debugger, reviewer, security, documenter, general)."
+                    "tester, debugger, reviewer, security, documenter, general). Pass "
+                    "'auto' to have Jev pick the specialist when none is named."
                 ),
             },
             "category": {

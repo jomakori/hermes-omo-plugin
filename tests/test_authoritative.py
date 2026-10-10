@@ -169,13 +169,53 @@ def test_flag_off_target_is_byte_identical():
     ctx, engine, lifecycle = _make_engine({})
     expected = engine._resolve_target(target="explore", category=None, parent_agent=None)
     got = engine._resolve_dispatch_target(goal="scan", target="explore", category=None, parent_agent=None)
-    assert got == expected
+    assert got == (*expected, "caller")
 
     out = engine.dispatch(goal="scan", target="explore")
     assert out["status"] == "succeeded"
     assert out["agent"] == "explore · Repository Exploration"
     assert lifecycle.launches == ["deepseek-v4-flash"]
     assert _route_events(ctx) == []
+
+
+def test_the_flag_covers_the_unnamed_dispatch():
+    # With the flag on, a dispatch that names nobody is Jev's to place.
+    ctx, engine, _lifecycle = _make_engine({"jev_routing_enabled": True})
+    with mock.patch.object(engine, "_jev_pick", return_value=("explore", 0.9, "ok")) as pick:
+        out = engine.dispatch(goal="scan the tree")
+
+    assert out["status"] == "succeeded"
+    assert out["agent"] == "explore · Repository Exploration"
+    pick.assert_called_once()
+    assert _route_events(ctx)[0]["source"] == "jev"
+
+
+def test_auto_asks_for_a_routed_pick():
+    ctx, engine, _lifecycle = _make_engine({})
+    with mock.patch.object(engine, "_jev_pick", return_value=("explore", 0.9, "ok")):
+        out = engine.dispatch(goal="scan the tree", target="auto")
+
+    assert out["agent"] == "explore · Repository Exploration"
+    assert _route_events(ctx)[0] == {"source": "jev", "confidence": 0.9, "target": "explore", "status": "ok"}
+
+
+def test_auto_without_a_confident_pick_is_refused():
+    ctx, engine, _lifecycle = _make_engine({})
+    with mock.patch.object(engine, "_jev_pick", return_value=(None, 0.2, "ok")):
+        with pytest.raises(GuardError):
+            engine.dispatch(goal="something vague", target="auto")
+
+    assert _route_events(ctx)[0]["source"] == "jev-low-confidence"
+
+
+def test_auto_asks_jev_even_with_the_flag_off():
+    ctx, engine, _lifecycle = _make_engine({})
+    with mock.patch.object(engine, "_jev_pick", return_value=("explore", 0.9, "ok")) as pick:
+        out = engine.dispatch(goal="scan the tree", target="auto")
+
+    pick.assert_called_once()
+    assert out["agent"] == "explore · Repository Exploration"
+    assert _route_events(ctx)[0]["source"] == "jev"
 
 
 def test_flag_on_explicit_agent_wins_and_jev_is_not_called():
@@ -200,31 +240,31 @@ def test_flag_on_confident_valid_pick_is_used():
     assert _route_events(ctx)[0]["target"] == "prometheus"
 
 
-def test_flag_on_low_confidence_falls_back_to_static():
+def test_flag_on_low_confidence_is_announced_and_falls_back_to_static():
     ctx, engine, _lifecycle = _make_engine({"jev_routing_enabled": True})
     with mock.patch.object(engine, "_jev_pick", return_value=(None, 0.4, "ok")):
         with pytest.raises(GuardError):
             engine.dispatch(goal="plan the migration")
 
-    assert _route_events(ctx) == [{"source": "static", "confidence": 0.4, "target": "", "status": "ok"}]
+    assert _route_events(ctx) == [{"source": "jev-low-confidence", "confidence": 0.4, "target": "", "status": "ok"}]
 
 
-def test_flag_on_invalid_pick_falls_back_to_static():
+def test_flag_on_invalid_pick_is_announced_and_falls_back_to_static():
     ctx, engine, _lifecycle = _make_engine({"jev_routing_enabled": True})
     with mock.patch.object(engine, "_jev_pick", return_value=(None, 0.9, "ok")):
         with pytest.raises(GuardError):
             engine.dispatch(goal="do something odd")
 
-    assert _route_events(ctx)[0]["source"] == "static"
+    assert _route_events(ctx)[0]["source"] == "jev-low-confidence"
 
 
-def test_flag_on_jev_error_falls_back_to_static():
+def test_flag_on_jev_error_is_announced_as_unavailable():
     ctx, engine, _lifecycle = _make_engine({"jev_routing_enabled": True})
     with mock.patch.object(engine, "_jev_pick", return_value=(None, 0.0, "error")):
         with pytest.raises(GuardError):
             engine.dispatch(goal="plan the migration")
 
-    assert _route_events(ctx) == [{"source": "static", "confidence": 0.0, "target": "", "status": "error"}]
+    assert _route_events(ctx) == [{"source": "jev-unavailable", "confidence": 0.0, "target": "", "status": "error"}]
 
 
 def test_flag_on_rejects_out_of_vocabulary_pick_from_resolution():
@@ -234,4 +274,4 @@ def test_flag_on_rejects_out_of_vocabulary_pick_from_resolution():
         with pytest.raises(GuardError):
             engine.dispatch(goal="plan the migration")
 
-    assert _route_events(ctx)[0]["source"] == "static"
+    assert _route_events(ctx)[0]["source"] == "jev-low-confidence"

@@ -63,9 +63,47 @@ def brier(records: list[dict[str, Any]] | None) -> float:
     return sum((confidence - outcome) ** 2 for confidence, outcome in labeled) / len(labeled)
 
 
-def summarize(records: list[dict[str, Any]] | None) -> dict[str, Any]:
-    """The report's numbers plus the disagreements, newest first."""
+def delivery_by_source(records: list[dict[str, Any]] | None) -> dict[str, dict[str, float]]:
+    """Delivery rate per routing source, joining each outcome to its dispatch row.
+
+    Agreement against the caller measures conformity to the caller's own pick, so it
+    cannot say whether a source was right. This joins the outcome record written when
+    a dispatch finishes back to the shadow row written when it started, and reports
+    what each source actually delivered. An outcome whose dispatch row is missing is
+    still counted, under its own source, so a torn pair shows up rather than vanishing.
+    """
     rows = [record for record in records or [] if isinstance(record, dict)]
+    by_dispatch: dict[str, str] = {
+        str(record.get("dispatch_id")): str(record.get("source") or "caller")
+        for record in rows
+        if record.get("_type") != "outcome" and record.get("dispatch_id")
+    }
+    tally: dict[str, list[int]] = {}
+    for record in rows:
+        if record.get("_type") != "outcome":
+            continue
+        dispatch_id = str(record.get("dispatch_id") or "")
+        if not dispatch_id:
+            continue
+        source = by_dispatch.get(dispatch_id) or str(record.get("source") or "caller")
+        counts = tally.setdefault(source, [0, 0])
+        counts[0] += 1
+        if record.get("delivered"):
+            counts[1] += 1
+    return {
+        source: {"dispatches": counts[0], "delivered": counts[1], "rate": counts[1] / counts[0]}
+        for source, counts in sorted(tally.items())
+    }
+
+
+def summarize(records: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """The report's numbers plus the disagreements, newest first.
+
+    Outcome rows are a second half, not dispatches: they are kept out of the totals
+    and the calibration sets, and used only to score delivery.
+    """
+    all_rows = [record for record in records or [] if isinstance(record, dict)]
+    rows = [record for record in all_rows if record.get("_type") != "outcome"]
     per_pack: dict[str, int] = {}
     for record in rows:
         pack = str(record.get("pack") or "unknown")
@@ -74,10 +112,12 @@ def summarize(records: list[dict[str, Any]] | None) -> dict[str, Any]:
     disagreements.sort(key=lambda record: str(record.get("ts") or ""), reverse=True)
     return {
         "total": len(rows),
+        "outcomes": sum(1 for record in all_rows if record.get("_type") == "outcome"),
         "per_pack": per_pack,
         "agreement": agreement(rows),
         "ece": ece(rows),
         "brier": brier(rows),
+        "delivery": delivery_by_source(all_rows),
         "disagreements": disagreements,
     }
 
@@ -106,6 +146,13 @@ def format_report(records: list[dict[str, Any]] | None, limit: int = 10) -> str:
         f"  ECE:        {summary['ece']:.4f}",
         f"  Brier:      {summary['brier']:.4f}",
     ]
+    delivery = summary.get("delivery") or {}
+    if delivery:
+        lines.append(f"  delivery by source ({summary.get('outcomes', 0)} outcomes):")
+        for source, counts in delivery.items():
+            lines.append(
+                f"    {source}: {counts['delivered']}/{counts['dispatches']} delivered ({counts['rate'] * 100:.0f}%)"
+            )
     disagreements = summary["disagreements"][: max(0, limit)]
     if disagreements:
         lines.append(f"  recent disagreements (up to {limit}):")
@@ -119,4 +166,4 @@ def format_report(records: list[dict[str, Any]] | None, limit: int = 10) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["agreement", "brier", "ece", "format_report", "summarize"]
+__all__ = ["agreement", "brier", "delivery_by_source", "ece", "format_report", "summarize"]
