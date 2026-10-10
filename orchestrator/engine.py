@@ -132,6 +132,11 @@ class OmoEngine:
         # session-scoped FallbackState that every dispatch rebuilds from scratch.
         self._stage_failures: dict[tuple[str, str], int] = {}
         self._stage_lock = threading.Lock()
+        # The provider-health cache (orchestrator.health_probe.HealthProbeCache),
+        # attached by the plugin entry point. Optional: with none attached, Jev
+        # candidate selection treats every agent/category as available (unprobed
+        # is not evidence of dead — the same rule `alive_candidates` itself uses).
+        self._health_cache: Any = None
 
     def _service(self) -> Any:
         if self._lifecycle is not None:
@@ -383,11 +388,31 @@ class OmoEngine:
             from jev.packs import agent_candidates
             from jev.routing import route_agent  # noqa: PLC0415 - optional routing surface
 
-            candidates = agent_candidates(self._enabled_agents())
+            unavailable: set[str] = set()
+            if self._health_cache is not None:
+                try:
+                    from orchestrator.health_probe import alive_candidates
+                    enabled_agents = self._enabled_agents()
+                    # Build a chain to probe: use the first agent's chain, or default to the first category.
+                    if enabled_agents:
+                        from roster import AGENTS
+                        for name in enabled_agents:
+                            spec = AGENTS.get(name)
+                            if spec and spec.chain:
+                                alive = alive_candidates(spec.chain, self._health_cache)
+                                unavailable = set(spec.chain) - set(alive)
+                                break
+                except Exception:
+                    # Health probe unavailable or errored; unprobed is not evidence of dead,
+                    # so we proceed with an empty unavailable set (everything appears live).
+                    pass
+
+            candidates = agent_candidates(self._enabled_agents(), unavailable=unavailable)
             return route_agent(
                 state={"user_message": goal},
                 valid_targets=set(candidates),
                 candidates=candidates,
+                unavailable=unavailable,
                 threshold=float(self._config("jev_routing_threshold", 0.75)),
                 base_url=self._config("jev_base_url", "https://api.typesafe.ai"),
                 model=self._config("jev_model", "jev-latest"),

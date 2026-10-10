@@ -120,24 +120,105 @@ PACKS: dict[str, Pack] = {
 }
 
 
-def agent_candidates(enabled: set[str] | None = None) -> dict[str, str]:
+# Per-agent/category capability hints: a short, differentiating one-liner used
+# as the default description when a caller passes no per-task `descriptions`
+# override to `agent_candidates`.
+#
+# OMR-12 (orchestrator observation): the roster's bare display string
+# ("hephaestus · Deep Agent") carries no task-relevant signal, and feeding
+# those generic labels to `pick_agent` collapsed a real routing decision to
+# confidence 0.33 — below the 0.5 threshold, so advisory-only. Rebuilding the
+# same decision with task-tuned one-line descriptions in the same call came
+# back 1.0 confident. These hints are the floor every `pick_agent` call gets
+# for free; a caller that knows the actual task should still pass
+# `descriptions=` naming what THIS request needs, since nothing beats a hint
+# written for the real request.
+_CAPABILITY_HINTS: dict[str, str] = {
+    "sisyphus": "primary ultraworker; multi-step execution, background subagent fan-out",
+    "hephaestus": "deep agent for large or ambiguous code changes across multiple files",
+    "prometheus": "builds a structured multi-step plan before any execution starts",
+    "atlas": "executes an existing plan: ordered steps, verification gates",
+    "metis": "advises on a plan already in progress; does not execute",
+    "momus": "critiques a plan or diff; flags gaps, risks, missed cases",
+    "oracle": "deep reasoning / architecture judgment on a hard open question",
+    "librarian": "external research: web search, docs, information lookup",
+    "explore": "repository exploration/search; answers 'where/what is X' in-repo",
+    "multimodal-looker": "vision-capable: analyzes images, screenshots, audio",
+    "sisyphus-junior": "focused single-task executor; narrow, bounded work only",
+    "tester": "writes or extends automated tests for existing code",
+    "debugger": "investigates a reported defect to find its root cause",
+    "security": "reviews code or config for security issues",
+    "deep": "category: routes to the deep-reasoning model chain",
+    "quick": "category: routes to the fast/cheap model chain for small tasks",
+    "ultrabrain": "category: routes to the top-tier reasoning model chain",
+    "visual-engineering": "category: routes to vision-capable models",
+    "writing": "category: routes to the prose/docs-tuned model chain",
+}
+
+
+def _default_description(name: str, fallback: str) -> str:
+    """``fallback`` (the roster display, or the bare category name) plus this
+    module's static capability hint when one exists for ``name`` — strictly
+    additive, so any caller relying on the old bare string as a substring
+    (e.g. matching on ``name · role``) still finds it.
+    """
+    hint = _CAPABILITY_HINTS.get(name)
+    return f"{fallback} — {hint}" if hint else fallback
+
+
+def agent_candidates(
+    enabled: set[str] | None = None,
+    *,
+    descriptions: dict[str, str] | None = None,
+    unavailable: set[str] | None = None,
+) -> dict[str, str]:
     """The ``pick_agent`` option map: agents plus categories, at call time.
 
-    Values are the roster's short display (``name · role``); categories map to
-    their own name. ``enabled`` restricts the agent half to that set (an empty or
-    None set means the whole roster) — the roster is never baked into the pack, the
-    caller supplies this map as dynamic ``criteria`` exactly as ``pick_skill``
-    takes a shortlist. Clamped to 255 entries and 255-char strings.
+    Values differentiate real capability, not just name/role (OMR-12 — see
+    ``_CAPABILITY_HINTS`` above for why). Resolution order per candidate:
+    ``descriptions[name]`` (the caller's per-task description — always the
+    best choice, since it can name exactly what THIS request needs) >
+    this module's static ``_CAPABILITY_HINTS`` (a differentiated default,
+    far better than bare "Name · Role" but not task-tuned) > the roster's
+    bare display string / category name (last resort, only when a name has
+    neither).
+
+    ``enabled`` restricts the agent half to that set (an empty or None set
+    means the whole roster).
+
+    ``unavailable`` is the merged provider-health probe's dead set
+    (``orchestrator.health_probe.alive_candidates``, PR #25) — any name in
+    it is dropped here, before Jev ever sees it, so a currently
+    quota/rate-limit-dead provider is never placed in Jev's criteria and can
+    never be the pick, however well its task-fit would otherwise read.
+    ``jev.routing.route_agent`` independently re-applies the same
+    ``unavailable`` set as a second gate, so a caller that builds candidates
+    here and still passes the raw (unfiltered) ``valid_targets`` elsewhere
+    is not silently unprotected.
+
+    The roster is never baked into the pack, the caller supplies this map as
+    dynamic ``criteria`` exactly as ``pick_skill`` takes a shortlist. Clamped
+    to 255 entries and 255-char strings.
     """
     from roster import AGENTS, CATEGORIES
 
+    dead = {str(name) for name in (unavailable or ())}
+    overrides = descriptions or {}
     candidates: dict[str, str] = {}
     for name, spec in AGENTS.items():
         if enabled is not None and name not in enabled:
             continue
-        candidates[str(name)[:255]] = str(spec.display)[:255]
+        if name in dead:
+            continue
+        key = str(name)[:255]
+        value = overrides.get(name) or _default_description(name, spec.display)
+        candidates[key] = str(value)[:255]
     for name in CATEGORIES:
-        candidates.setdefault(str(name)[:255], str(name)[:255])
+        if name in dead:
+            continue
+        key = str(name)[:255]
+        value = overrides.get(name) or _default_description(name, name)
+        candidates.setdefault(key, str(value)[:255])
     return dict(list(candidates.items())[:255])
 
 
