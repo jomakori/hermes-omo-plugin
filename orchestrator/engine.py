@@ -12,6 +12,7 @@ from typing import Any
 from orchestrator import session
 from orchestrator.boundary import claim_boundary
 from orchestrator.chains import (
+    HOP_REASON_PROVIDER_UNUSABLE,
     HOP_REASON_SUCCESS,
     classify_failure_reason,
     client_disconnected,
@@ -132,6 +133,11 @@ class OmoEngine:
         # session-scoped FallbackState that every dispatch rebuilds from scratch.
         self._stage_failures: dict[tuple[str, str], int] = {}
         self._stage_lock = threading.Lock()
+        # The provider-health cache (orchestrator.health_probe.HealthProbeCache),
+        # attached by the plugin entry point. Optional: with none attached, Jev
+        # candidate selection treats every agent/category as available (unprobed
+        # is not evidence of dead — the same rule `alive_candidates` itself uses).
+        self._health_cache: Any = None
 
     def _service(self) -> Any:
         if self._lifecycle is not None:
@@ -611,6 +617,7 @@ class OmoEngine:
         service = self._service()
         state = self.chains.state_for(worker.agent_name, worker.chain)
         last_error = ""
+        last_reason = ""
         if self._attempts_exhausted(worker):
             # This stage has already been paid for `max_attempts_per_agent` times and
             # failed every time: another walk would start at the primary and, on a
@@ -676,6 +683,7 @@ class OmoEngine:
             if client_disconnected(error):
                 break
             reason = classify_failure_reason(status=status_from_message(error), message=error)
+            last_reason = reason
             if not state.retryable(status=status_from_message(error), message=error):
                 state.record_failure(request.model or "", reason=reason)
                 break
@@ -694,7 +702,15 @@ class OmoEngine:
         else:
             worker.status = FAILED
             worker.error = last_error
-            self._record_stage_failure(worker)
+            if last_reason != HOP_REASON_PROVIDER_UNUSABLE:
+                # A walk that ends on a drained-quota hop (GitHub Copilot's 402
+                # `quota_exceeded`, see orchestrator/health_probe.py REASON_QUOTA)
+                # says nothing about whether this agent/model can do the work —
+                # the seat is simply unusable until its quota window resets. It
+                # must not consume the stage's `max_attempts_per_agent` budget,
+                # or a transient quota drain would wrongly block every future
+                # walk for this stage until a human intervenes.
+                self._record_stage_failure(worker)
         # The walk is over: keep which hops were tried and why they were dropped,
         # whatever the terminal state (cancelled hops are history too).
         worker.hop_history = list(state.hop_history)
