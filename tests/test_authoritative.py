@@ -174,7 +174,7 @@ def test_flag_off_target_is_byte_identical():
     out = engine.dispatch(goal="scan", target="explore")
     assert out["status"] == "succeeded"
     assert out["agent"] == "explore · Repository Exploration"
-    assert lifecycle.launches == ["deepseek-v4-flash"]
+    assert lifecycle.launches == ["deepseek-v4-flash-direct"]
     assert _route_events(ctx) == []
 
 
@@ -224,7 +224,7 @@ def test_flag_on_explicit_agent_wins_and_jev_is_not_called():
         out = engine.dispatch(goal="scan", target="explore")
 
     assert out["status"] == "succeeded"
-    assert lifecycle.launches == ["deepseek-v4-flash"]
+    assert lifecycle.launches == ["deepseek-v4-flash-direct"]
     pick.assert_not_called()
     assert _route_events(ctx) == [{"source": "static", "confidence": 0.0, "target": "explore", "status": "explicit"}]
 

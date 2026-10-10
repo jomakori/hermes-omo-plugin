@@ -368,4 +368,4 @@ def test_dispatch_stays_fail_open_when_shadow_raises(tmp_path):
             assert called.wait(2.0), "shadow path was never invoked"
 
     assert out["status"] == "succeeded"
-    assert lifecycle.launches == ["deepseek-v4-flash"]
+    assert lifecycle.launches == ["deepseek-v4-flash-direct"]

@@ -32,88 +32,94 @@ AGENTS: dict[str, AgentSpec] = {
         "sisyphus",
         "Ultraworker",
         "primary",
-        (L + "deepseek-v4-flash-direct", L + "claude-sonnet-5", L + "bytedance-glm-5.2"),
+        (L + "copilot-luna", L + "claude-sonnet-5", L + "copilot-grok", L + "deepseek-v4-flash-direct"),
         orchestrator=True,
     ),
     "hephaestus": AgentSpec(
         "hephaestus",
         "Deep Agent",
         "primary",
-        (L + "minimax-m3", L + "glm-5.3", L + "claude-sonnet-5", L + "bytedance-dola-seed-2.0-code"),
+        (
+            L + "copilot-luna",
+            L + "copilot-codex",
+            L + "claude-sonnet-5",
+            L + "copilot-mai-code",
+            L + "deepseek-v4-flash-direct",
+        ),
     ),
     "prometheus": AgentSpec(
         "prometheus",
         "Plan Builder",
         "primary",
-        (L + "minimax-m3", L + "deepseek-v4-pro", L + "claude-sonnet-5", L + "bytedance-glm-5.2"),
+        (L + "copilot-luna", L + "claude-sonnet-5", L + "copilot-grok", L + "deepseek-v4-flash-direct"),
     ),
     "atlas": AgentSpec(
         "atlas",
         "Plan Executor",
         "primary",
-        (L + "minimax-m3", L + "deepseek-v4-pro", L + "claude-sonnet-5", L + "bytedance-dola-seed-2.0-pro"),
+        (L + "copilot-luna", L + "claude-sonnet-5", L + "deepseek-v4-flash-direct"),
         orchestrator=True,
     ),
     "metis": AgentSpec(
         "metis",
         "Plan Consultant",
         "subagent",
-        (L + "minimax-m3", L + "deepseek-v4-pro", L + "claude-sonnet-5", L + "bytedance-glm-5.2"),
+        (L + "copilot-luna", L + "claude-sonnet-5", L + "copilot-mai-code", L + "deepseek-v4-flash-direct"),
     ),
     "momus": AgentSpec(
         "momus",
         "Plan Critic",
         "subagent",
-        (L + "minimax-m3", L + "glm-5.3", L + "claude-sonnet-5", L + "bytedance-dola-seed-2.0-pro"),
+        (L + "copilot-luna", L + "claude-sonnet-5", L + "copilot-gemini-3.8-flash", L + "deepseek-v4-flash-direct"),
     ),
     "oracle": AgentSpec(
         "oracle",
         "Architecture / Reasoning",
         "subagent",
-        (L + "claude-opus-5", L + "glm-5.3", L + "bytedance-seed-code"),
+        (L + "claude-opus-5", L + "copilot-sonnet-5.5", L + "deepseek-v4-flash-direct"),
     ),
     "librarian": AgentSpec(
         "librarian",
         "Research",
         "subagent",
-        (L + "deepseek-v4-flash", L + "minimax-m3", L + "claude-haiku-4-5", L + "bytedance-deepseek-v4-flash"),
+        (L + "deepseek-v4-flash-direct", L + "copilot-luna", L + "claude-haiku-4-5", L + "deepseek-v4-flash-direct"),
     ),
     "explore": AgentSpec(
         "explore",
         "Repository Exploration",
         "subagent",
-        (L + "deepseek-v4-flash", L + "minimax-m3", L + "claude-haiku-4-5", L + "bytedance-deepseek-v4-flash"),
+        (L + "deepseek-v4-flash-direct", L + "copilot-luna", L + "claude-haiku-4-5", L + "deepseek-v4-flash-direct"),
     ),
     "multimodal-looker": AgentSpec(
         "multimodal-looker",
         "Multimodal Analysis",
         "subagent",
-        (L + "gemini-3.6-flash", L + "qwen3-6-plus", L + "claude-sonnet-5", L + "bytedance-seed-code"),
+        (L + "claude-sonnet-5", L + "copilot-gemini-3.8-flash", L + "claude-haiku-4-5", L + "deepseek-v4-flash-direct"),
     ),
     "sisyphus-junior": AgentSpec(
         "sisyphus-junior",
         "Specialized Execution Worker",
         "subagent",
-        (L + "deepseek-v4-flash", L + "minimax-m3", L + "claude-haiku-4-5", L + "bytedance-deepseek-v4-flash"),
+        (L + "copilot-luna", L + "claude-haiku-4-5", L + "deepseek-v4-flash-direct"),
         accepts_subagent_type=False,
     ),
     "tester": AgentSpec(
         "tester",
         "Test Author",
         "subagent",
-        (L + "deepseek-v4-flash", L + "minimax-m3", L + "claude-sonnet-5", L + "bytedance-dola-seed-2.0-code"),
+        (L + "copilot-luna", L + "claude-sonnet-5", L + "deepseek-v4-flash-direct"),
     ),
     "debugger": AgentSpec(
         "debugger",
         "Defect Investigator",
         "subagent",
-        (L + "minimax-m3", L + "deepseek-v4-pro", L + "claude-sonnet-5", L + "bytedance-dola-seed-2.0-pro"),
+        (L + "copilot-luna", L + "copilot-codex", L + "claude-sonnet-5", L + "copilot-mai-code"),
     ),
     "security": AgentSpec(
         "security",
         "Security Reviewer",
         "subagent",
-        (L + "deepseek-v4-pro", L + "claude-sonnet-5", L + "glm-5.3", L + "bytedance-dola-seed-2.0-pro"),
+        (L + "copilot-luna", L + "claude-sonnet-5", L + "copilot-grok"),
     ),
 }
 
@@ -135,12 +141,28 @@ ROLE_ALIASES: dict[str, str] = {
 }
 
 CATEGORIES: dict[str, tuple[str, ...]] = {
-    "quick": (L + "deepseek-v4-flash", L + "minimax-m3", L + "claude-haiku-4-5"),
-    "deep": (L + "minimax-m3", L + "glm-5.3", L + "claude-sonnet-5", L + "bytedance-dola-seed-2.0-pro"),
-    "ultrabrain": (L + "claude-opus-5", L + "glm-5.3", L + "bytedance-seed-code"),
-    "visual-engineering": (L + "gemini-3.6-flash", L + "qwen3-6-plus", L + "claude-sonnet-5"),
-    "writing": (L + "minimax-m3", L + "claude-sonnet-5"),
+    "deep": (L + "copilot-luna", L + "claude-sonnet-5", L + "copilot-grok", L + "deepseek-v4-flash-direct"),
+    "quick": (
+        L + "deepseek-v4-flash-direct",
+        L + "copilot-luna",
+        L + "claude-haiku-4-5",
+        L + "deepseek-v4-flash-direct",
+    ),
+    "ultrabrain": (L + "claude-opus-5", L + "copilot-sonnet-5.5", L + "deepseek-v4-flash-direct"),
+    "visual-engineering": (
+        L + "claude-sonnet-5",
+        L + "copilot-gemini-3.8-flash",
+        L + "claude-haiku-4-5",
+        L + "deepseek-v4-flash-direct",
+    ),
+    "writing": (
+        L + "copilot-luna",
+        L + "claude-sonnet-5",
+        L + "copilot-gemini-3.8-flash",
+        L + "deepseek-v4-flash-direct",
+    ),
 }
+
 
 PLAN_FAMILY: frozenset[str] = frozenset({"plan", "prometheus"})
 
