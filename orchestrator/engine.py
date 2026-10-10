@@ -392,10 +392,12 @@ class OmoEngine:
             if self._health_cache is not None:
                 try:
                     from orchestrator.health_probe import alive_candidates
+
                     enabled_agents = self._enabled_agents()
                     # Build a chain to probe: use the first agent's chain, or default to the first category.
                     if enabled_agents:
                         from roster import AGENTS
+
                         for name in enabled_agents:
                             spec = AGENTS.get(name)
                             if spec and spec.chain:
