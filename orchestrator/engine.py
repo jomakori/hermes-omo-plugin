@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from orchestrator import session
@@ -53,6 +56,37 @@ SHUTDOWN_ERROR = "gateway shut down mid-run; verify its work on disk before re-d
 # The short cause the live status row shows for an interrupted worker; the long
 # error above stays on the record for the reader who needs the detail.
 INTERRUPTED_CAUSE = "gateway restart"
+
+# A brief names its deliverables one per line: `ARTIFACT: <path>`. The host returns
+# a worker's result as text plus a duration — no tool names, no repository state —
+# so the brief is the only place a deliverable can be stated. A lane that names
+# none is checked for nothing, which keeps read-only personas unaffected.
+ARTIFACT_MARKER = re.compile(r"^[ \t]*ARTIFACT:[ \t]*(\S+)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+ARTIFACT_MISSING_ERROR = "closed without producing the declared deliverable(s): {paths}"
+
+
+def declared_artifacts(brief: str) -> list[str]:
+    """Deliverables a brief declares, in the order they appear."""
+    return ARTIFACT_MARKER.findall(brief or "")
+
+
+def artifact_failure(
+    brief: str,
+    enabled: bool = True,
+    exists: Callable[[str], bool] = os.path.exists,
+) -> str:
+    """An error naming a brief's unmet deliverables, or "" when satisfied.
+
+    A child that explores for its whole budget and closes cleanly reports a
+    non-FAILED terminal state, so the run would otherwise read SUCCEEDED with
+    nothing on disk. Requiring what the brief declared is what makes that outcome
+    visible; a brief that declares nothing is never failed here.
+    """
+    if not enabled:
+        return ""
+    missing = [path for path in declared_artifacts(brief) if not exists(os.path.expanduser(path))]
+    return ARTIFACT_MISSING_ERROR.format(paths=", ".join(missing)) if missing else ""
+
 
 _TASK_CONTEXT_OPEN = "<task_context>"
 _TASK_CONTEXT_CLOSE = "\n</task_context>"
@@ -580,6 +614,17 @@ class OmoEngine:
                 result = service.result(handle)
                 worker.result = result
                 if not self._result_failed(result):
+                    artifact_error = self._artifact_failure(worker)
+                    if artifact_error:
+                        # The child closed cleanly but produced nothing the brief
+                        # asked for. Not a stage failure — the chain says nothing
+                        # about whether a model can do the work — so the hop budget
+                        # is untouched and the outcome is simply FAILED.
+                        worker.status = FAILED
+                        worker.error = artifact_error
+                        worker.finished_at = time.time()
+                        self._progress("worker_failed", self._worker_event(run, worker))
+                        return self._outcome(run, worker)
                     worker.status = SUCCEEDED
                     state.record_success(worker.model or "")
                     worker.hop_history = list(state.hop_history)
@@ -758,6 +803,13 @@ class OmoEngine:
         if state is None:
             return False
         return "FAILED" in str(getattr(state, "name", state)).upper()
+
+    def _artifact_failure(self, worker: Worker) -> str:
+        """The brief's unmet deliverables, or "" when satisfied."""
+        return artifact_failure(
+            worker.task,
+            enabled=bool(self._config("require_declared_artifacts", True)),
+        )
 
     def _result_error(self, result: Any) -> str:
         return str(getattr(result, "error_message", "") or getattr(result, "summary", "") or "subagent failed")
