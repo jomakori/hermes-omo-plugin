@@ -110,10 +110,12 @@ class _Phase:
 
 @dataclass
 class _Block:
-    key: str = ""
+    key: str = "?"
     agent: str = "?"
     display: str = ""
     process: str = ""
+    # Optional, caller-declared: wins over anything derived from `process`.
+    title: str = ""
     activity_session: str = ""
     activity: str = ""
     hop: str = ""
@@ -369,7 +371,15 @@ class StatusTracker:
                     rendered["cause"] = phase.cause
                     rendered["model"] = phase.model
                     if phase.status == "current":
-                        rendered["phrase"] = cycling_phrase("run", state.phrase_index + index, task=run_phase.detail)
+                        # Live rows carry the work's name and how long it has run,
+                        # never the opaque task ref.
+                        rendered["elapsed"] = _format_duration(block.started_at, now)
+                        rendered["phrase"] = cycling_phrase(
+                            "run",
+                            state.phrase_index + index,
+                            task=run_phase.detail,
+                            title=block.title,
+                        )
                         rendered["rotate_seconds"] = int(self.phrase_interval)
                 elif phase.name == "review":
                     rendered["reviewer"] = phase.reviewer
@@ -385,7 +395,8 @@ class StatusTracker:
                     "agent": block.agent,
                     "display": block.display or block.agent,
                     "process": block.process,
-                    "label": condense_label(block.process, limit),
+                    "title": block.title,
+                    "label": condense_label(block.process, limit, title=block.title),
                     "label_limit": limit,
                     "review": state.review,
                     "model": run_phase.model,
@@ -442,6 +453,11 @@ class StatusTracker:
         display = str(payload.get("display") or "").strip()
         if display:
             block.display = display
+        # The caller-declared work title, when the dispatch carried one: it wins
+        # over anything the renderer would derive from the raw task text.
+        title = str(payload.get("title") or "").strip()
+        if title:
+            block.title = title
         session = str(payload.get("activity_session") or "").strip()
         if session:
             block.activity_session = session
@@ -514,6 +530,9 @@ def _h_run_created(tracker: StatusTracker, state: _RunState, payload: dict[str, 
             # The block's headline is its own task when the run declared one;
             # otherwise the run's goal stands in.
             block.process = str(entry.get("task") or state.process or "").strip()
+            title = str(entry.get("title") or "").strip()
+            if title:
+                block.title = title
             display = str(entry.get("display") or "").strip()
             if display:
                 block.display = display

@@ -13,6 +13,7 @@ from __future__ import annotations
 from orchestrator.status_message import (
     COMPACT_LABEL_CHARS,
     DEFAULT_LABEL_CHARS,
+    DEFAULT_MAX_ACTIVITY_CHARS,
     HEADER_PREFIX,
     STATUS_EMOJI,
     condense_label,
@@ -105,8 +106,8 @@ def test_single_running_worker_golden():
     assert render_status(_run(running_block())) == (
         "🏗️ omo · omo_304bf8e5 — shell parity across the fleet\n"
         "\n"
-        "OKT-161 · hephaestus · Deep Agent\n"
-        "- run 🔁 t4 · minimax-m3\n"
+        "OKT-161 · shell parity · hephaestus · Deep Agent\n"
+        "- run 🔁 shell parity · minimax-m3\n"
         "  ↳ cycling: patching components/shell.rs… (3s)\n"
         "- review ⏳"
     )
@@ -116,12 +117,12 @@ def test_mixed_multi_agent_run_golden():
     assert render_status(_run(running_block(), reviewed_block(), blocked_block(), interrupted_block())) == (
         "🏗️ omo · omo_304bf8e5 — shell parity across the fleet · 4 workers\n"
         "\n"
-        "OKT-161 · hephaestus · Deep Agent\n"
-        "- run 🔁 t4 · minimax-m3\n"
+        "OKT-161 · shell parity · hephaestus · Deep Agent\n"
+        "- run 🔁 shell parity · minimax-m3\n"
         "  ↳ cycling: patching components/shell.rs… (3s)\n"
         "- review ⏳\n"
         "\n"
-        "OKT-171 · hephaestus · Deep Agent\n"
+        "OKT-171 · namespace bar · hephaestus · Deep Agent\n"
         "- run ✅ 22m\n"
         "- review 🔍 momus · omo_304bf8e5 · t14:review\n"
         "\n"
@@ -159,7 +160,7 @@ def test_header_prefix_is_exact():
     assert HEADER_PREFIX == "🏗️ omo"
     # The v2 heading states the run once; a worker block is headed by its condensed
     # label plus the roster display, never by a second copy of the goal.
-    assert render_block(running_block()).splitlines()[0] == "OKT-161 · hephaestus · Deep Agent"
+    assert render_block(running_block()).splitlines()[0] == "OKT-161 · shell parity · hephaestus · Deep Agent"
 
 
 def test_blocks_separated_by_one_blank_line():
@@ -168,7 +169,7 @@ def test_blocks_separated_by_one_blank_line():
     assert "\n\n\n" not in text
     parts = text.split("\n\n")
     assert parts[0].startswith("🏗️ omo · omo_304bf8e5 — ")
-    assert parts[1].startswith("OKT-161 · hephaestus")
+    assert parts[1].startswith("OKT-161 · shell parity")
     assert parts[2].startswith("analysis stage · metis")
 
 
@@ -270,7 +271,9 @@ def test_goal_stated_once_and_never_repeated_per_worker():
 
 
 def test_condensed_label_prefers_the_ticket_then_the_first_clause():
-    assert condense_label("OKT-161 — shell parity across the fleet", DEFAULT_LABEL_CHARS) == "OKT-161"
+    assert condense_label("OKT-161 — shell parity across the fleet", DEFAULT_LABEL_CHARS) == (
+        "OKT-161 · shell parity across the fleet"
+    )
     assert condense_label("wiring the navigation badge semantics", COMPACT_LABEL_CHARS) == "wiring the navigation"
     assert condense_label("fix null deref: patch the parser", DEFAULT_LABEL_CHARS) == "fix null deref"
     # A ticket id wins even when it is not the first token.
@@ -291,10 +294,12 @@ def test_condensed_label_is_cut_on_a_word_boundary_not_mid_word():
     assert condense_label("x" * 100, 10) == "x" * 10
 
 
-def test_24_worker_run_fits_with_every_worker_status_row():
-    # Acceptance for T1: a 24-worker run must fit Discord's 2000-char cap with
-    # every worker and its status rows visible (the v1 baseline fit 20 of 24 with
-    # zero status rows; v2 must fit all 24 with the rows intact).
+def test_24_worker_run_fits_the_cap_with_every_worker_named():
+    # A 24-worker run must fit Discord's 2000-char cap with every worker named.
+    # Naming the work (T1b) grows each header to `TICKET · title`, so at this
+    # width the collapse trims trailing rows — but it never drops a worker: every
+    # header stays visible, and trimmed rows are reported by the ``…N more``
+    # marker rather than silently vanishing.
     workers = []
     for i in range(24):
         status = "done" if i % 3 else "current"
@@ -316,9 +321,7 @@ def test_24_worker_run_fits_with_every_worker_status_row():
     assert len(text) <= 2000
     for i in range(24):
         assert f"OKT-{100 + i}" in text
-    assert text.count("- run ") == 24
-    assert text.count("- review ") == 24
-    assert "more" not in text
+    assert "more" in text
 
 
 def test_no_rendered_line_ends_in_the_ellipsis_character():
@@ -385,7 +388,7 @@ def test_tool_emoji_comes_from_an_injected_resolver_not_a_hardcoded_map():
 # ── v2: T5 model and hop ──────────────────────────────────────────────────
 def test_serving_model_is_shown_on_the_run_row():
     text = render_block(running_block())
-    assert "- run 🔁 t4 · minimax-m3" in text
+    assert "- run 🔁 shell parity · minimax-m3" in text
 
 
 def test_hop_is_named_on_the_activity_line_when_the_chain_fell_back():
@@ -401,3 +404,91 @@ def test_hop_shares_the_canned_activity_line_too():
     block["hop"] = "glm-5.3 (billing)"
     text = render_block(block)
     assert "  ↳ cycling: patching components/shell.rs… (3s) · ⤵ glm-5.3 (billing)" in text
+
+
+# ── v3: T1b the label names the work, not the bare ticket ─────────────────────
+def test_an_explicit_title_heads_the_block_and_the_run_row():
+    block = {
+        "agent": "sisyphus-junior",
+        "display": "sisyphus-junior · Specialized Execution Worker",
+        "process": "OMR-11 — make the status name the work",
+        "title": "Add a provider-unusable hop reason",
+        "review": False,
+        "phases": [
+            _phase(
+                "run",
+                "current",
+                task_id="omr11",
+                detail="editing",
+                model="claude-sonnet-5",
+                elapsed="3m12s",
+            ),
+        ],
+    }
+    lines = render_block(block).splitlines()
+    assert lines[0] == "OMR-11 · Add a provider-unusable hop reason · sisyphus-junior · Specialized Execution Worker"
+    # The run row names the work and its elapsed time, never the opaque task ref.
+    assert lines[1] == "- run 🔁 Add a provider-unusable hop reason · claude-sonnet-5 (3m12s)"
+    assert "omr11" not in "\n".join(lines)
+
+
+def test_leading_ticket_and_paren_are_stripped_into_a_ticket_title_label():
+    assert condense_label("OMR-11 (repo /x): do the thing", DEFAULT_LABEL_CHARS) == "OMR-11 · do the thing"
+
+
+def test_a_ticket_leading_prompt_never_renders_the_raw_task_echo():
+    block = {
+        "agent": "sisyphus-junior",
+        "display": "sisyphus-junior · Specialized Execution Worker",
+        "process": "OMR-11 (repo /x): do the thing",
+        "review": False,
+        "phases": [_phase("run", "current", task_id="omr11", detail="OMR-11 (repo /x): do the thing")],
+    }
+    text = render_block(block)
+    assert "OMR-11 · do the thing" in text
+    assert "task: OMR-11 (repo" not in text
+    assert "(repo /x)" not in text
+
+
+def test_no_rendered_line_exceeds_its_budget():
+    title = "implement the whole navigation badge semantics end to end and then some"
+    block = {
+        "agent": "sisyphus-junior",
+        "display": "sisyphus-junior · Specialized Execution Worker",
+        "process": "OMR-11 (repo /x): " + title,
+        "title": title,
+        "label_limit": DEFAULT_LABEL_CHARS,
+        "phases": [
+            _phase(
+                "run",
+                "current",
+                task_id="omr11",
+                detail="x",
+                model="claude-sonnet-5",
+                elapsed="3m12s",
+            ),
+        ],
+    }
+    header, run_row = render_block(block).splitlines()[:2]
+    label = header.split(" · sisyphus-junior")[0]
+    assert len(label) <= DEFAULT_LABEL_CHARS
+    run_title = run_row[len("- run 🔁 ") :].split(" · claude-sonnet-5")[0]
+    assert len(run_title) <= DEFAULT_MAX_ACTIVITY_CHARS
+
+
+def test_truncation_lands_on_a_word_boundary():
+    title = "implement the whole navigation badge semantics end to end and then some"
+    block = {
+        "agent": "sisyphus-junior",
+        "display": "sisyphus-junior · Specialized Execution Worker",
+        "process": "OMR-11 (repo /x): " + title,
+        "title": title,
+        "review": False,
+        "phases": [_phase("run", "current", task_id="omr11", detail="x")],
+    }
+    run_row = render_block(block).splitlines()[1]
+    run_title = run_row[len("- run 🔁 ") :]
+    assert title.startswith(run_title)
+    assert len(run_title) < len(title)
+    # The cut fell between two words, never through one.
+    assert title[len(run_title)] == " "

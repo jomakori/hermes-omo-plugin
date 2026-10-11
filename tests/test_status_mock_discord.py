@@ -319,9 +319,9 @@ def test_graph_fanout_posts_one_heading_with_a_condensed_label_per_worker():
     assert text.count("🏗️ omo") == 1
     assert text.splitlines()[0] == f"🏗️ omo · omo_g — {GOAL} · 3 workers"
     for label, role in (
-        ("OKT-101", "explore · Repository Exploration"),
-        ("OKT-102", "hephaestus · Deep Agent"),
-        ("OKT-103", "momus · Plan Critic"),
+        ("OKT-101 · map the repo", "explore · Repository Exploration"),
+        ("OKT-102 · write the fix", "hephaestus · Deep Agent"),
+        ("OKT-103 · review it", "momus · Plan Critic"),
     ):
         assert f"{label} · {role}" in text
     # review is off by default: no review row is ever inferred into existence.
@@ -339,8 +339,8 @@ def test_small_run_shape_and_line_count():
         "🏗️ omo · omo_1 — fix the bug",
         "",
         "fix the bug · hephaestus · Deep Agent",
-        "- run 🔁 omo_1 · minimax-m3",
-        "  ↳ cycling: task: fix (3s)",
+        "- run 🔁 fix the bug · minimax-m3 (0s)",
+        "  ↳ cycling: reading the code: fix the bug (3s)",
     ]
     assert len(running.splitlines()) == 5
 

@@ -19,16 +19,18 @@ of the goal::
         "review": True,
         "workers": [
             {
-                "label": "OKT-161",                 # condensed, cut on a word boundary
+                "label": "OKT-161 · shell parity",   # condensed `TICKET · title`, word-cut
                 "display": "hephaestus · Deep Agent",  # roster AgentSpec.display
                 "process": "OKT-161 — shell parity",   # raw task the label came from
+                "title": "Add a provider-unusable hop reason",  # optional, caller-declared
                 "review": True,                        # per-run review flag, read off the payload
                 "activity": "📖 read_file orchestrator/status_message.py",  # live, optional
                 "hop": "claude-sonnet-5 (rate limit)", # chain fallback, optional
                 "phases": [
                     {"name": "dispatch", "status": "done"},
-                    {"name": "run", "status": "current", "task_id": "t4",
-                     "model": "copilot-luna", "phrase": "patching components/shell.rs…"},
+                    {"name": "run", "status": "current",
+                     "model": "copilot-luna", "elapsed": "3m12s",
+                     "phrase": "patching components/shell.rs…"},
                     {"name": "review", "status": "reviewing", "reviewer": "momus",
                      "task_id": "t14:review"},
                 ],
@@ -41,9 +43,11 @@ order — dispatch, run, review — with two deliberate omissions: the dispatch 
 is dropped once it is ``done`` (the run row implies it), and the whole review row
 is dropped when the run's ``review`` flag is false. The ``review`` row is *folded
 into the producing worker's block*; there is never a separate review block. The
-current (🔁) run row names the task and the serving model and is followed by the
-indented line carrying the worker's real tool call (or the canned rotating
-phrase), with a chain fallback named on the same line.
+current (🔁) run row names the *work* — the caller-declared ``title``, else the
+first clause derived from the task text, never the opaque task ref — plus the
+serving model and the elapsed time, and is followed by the indented line carrying
+the worker's real tool call (or the canned rotating phrase naming the work), with
+a chain fallback named on the same line.
 
 Truncation is always on a word boundary and never appends an ellipsis: the only
 rendered ellipsis is the deliberate ``…N more`` collapse marker, which never
@@ -101,6 +105,12 @@ PHASES = ("dispatch", "run", "review")
 # A ticket id is the best label a task can offer: stable, short, and what the
 # reader already tracks. `OKT-161`, `PROJ-7`, `A1-22`.
 _TICKET = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d{1,5}\b")
+# A ticket id leading the raw text, with its trailing whitespace.
+_LEADING_TICKET = re.compile(r"^([A-Z][A-Z0-9]{1,9}-\d{1,5})\b\s*")
+# A `(...)` aside right after the ticket (e.g. `OMR-11 (repo /x): ...`) — only a
+# matched pair is stripped, so an unmatched `(` is left exactly where it is.
+_PAREN_LEADING = re.compile(r"^\(([^()]*)\)\s*")
+_LEADING_SEP = re.compile(r"^[\s:,\-–—]+")
 # Otherwise the first clause is the label: cut at an em/en dash, a colon, or a
 # sentence end. A bare hyphen is not a separator (`claude-sonnet-5` is a name).
 _CLAUSE_SPLIT = re.compile(r"\s*(?:—|–|:)\s*|\s+[.?!]\s+")
@@ -153,23 +163,81 @@ def _first_clause(value: str) -> str:
     return head or value
 
 
+def _strip_leading_ticket_and_paren(value: str) -> str:
+    """Drop a leading ticket-id token and a leading `(...)` aside, if present.
+
+    Only a *matched* leading parenthetical is stripped — an unmatched `(` with
+    no closing `)` is left exactly where it is.
+    """
+    value = _LEADING_TICKET.sub("", value, count=1)
+    paren = _PAREN_LEADING.match(value)
+    if paren:
+        value = value[paren.end() :]
+    return _LEADING_SEP.sub("", value)
+
+
+def _derive_title(value: str) -> str:
+    """The work's short title: leading ticket/aside stripped, first clause taken."""
+    stripped = _strip_leading_ticket_and_paren(value)
+    return _first_clause(stripped) if stripped else ""
+
+
+def _balance_parens(text: str) -> str:
+    """Drop a trailing `(` that a word-boundary cut left without its `)`."""
+    if text.count("(") > text.count(")"):
+        text = text[: text.rfind("(")].rstrip()
+    return text
+
+
+def _title_only(text: Any, title: Any = None) -> str:
+    """Just the work's title, with no ticket prefix — what the run row names.
+
+    The header already states `TICKET · title`; repeating the ticket on the run
+    row would waste the row's own budget on something the reader already saw.
+    """
+    explicit = " ".join(str(title).split()) if title else ""
+    if explicit:
+        return explicit
+    value = " ".join(str(text or "").split())
+    if not value:
+        return ""
+    ticket = _TICKET.search(value)
+    if ticket is not None and ticket.start() == 0:
+        return _derive_title(value)
+    return _first_clause(value)
+
+
 def label_limit(fanout: int) -> int:
     """The condensed-label budget for a run of `fanout` workers."""
     return COMPACT_LABEL_CHARS if int(fanout or 0) > FANOUT_COMPACT_THRESHOLD else DEFAULT_LABEL_CHARS
 
 
-def condense_label(text: Any, limit: int = DEFAULT_LABEL_CHARS) -> str:
-    """One short label for a worker: its ticket id, else its first clause.
+def condense_label(text: Any, limit: int = DEFAULT_LABEL_CHARS, title: Any = None) -> str:
+    """One short label for a worker: `TICKET · title` when a title is known.
 
-    The goal is already stated once in the run heading, so a worker must not
-    repeat it. Cut on a word boundary — never mid-word, never with an ellipsis.
+    An explicit `title` (the dispatch task's own, caller-declared) always wins
+    and is combined with a detected ticket id as `TICKET · title`. Absent one,
+    a task whose text *leads* with a ticket id gets a title derived from what
+    follows it (the ticket, and any leading `(...)` aside, stripped — then the
+    first clause). A ticket that is not leading, or no ticket at all, falls
+    back to the original condensed label (the bare ticket, or the first
+    clause) rather than a noisier derived one. Cut on a word boundary — never
+    mid-word, never with an ellipsis, never leaving an unmatched paren behind.
     """
     value = " ".join(str(text or "").split())
-    if not value:
-        return ""
-    ticket = _TICKET.search(value)
-    base = ticket.group(0) if ticket else _first_clause(value)
-    return _cut(base, limit)
+    ticket = _TICKET.search(value) if value else None
+    ticket_text = ticket.group(0) if ticket else ""
+    explicit = " ".join(str(title).split()) if title else ""
+    if explicit:
+        combined = f"{ticket_text} · {explicit}" if ticket_text else explicit
+    elif ticket is not None and ticket.start() == 0:
+        derived = _derive_title(value)
+        combined = f"{ticket_text} · {derived}" if derived else ticket_text
+    elif ticket_text:
+        combined = ticket_text
+    else:
+        combined = _first_clause(value) if value else ""
+    return _balance_parens(_cut(combined, limit))
 
 
 def tool_emoji(tool_name: Any, *, default: str = "⚡", resolver: Any = None) -> str:
@@ -215,12 +283,17 @@ def _join(*parts: Any, sep: str = " · ") -> str:
     return sep.join(str(p).strip() for p in parts if str(p or "").strip())
 
 
-def _run_extra(status: str, phase: dict[str, Any], model: str) -> str:
-    """The text after the run emoji: refs+model while running, else cause/elapsed."""
+def _run_extra(status: str, phase: dict[str, Any], model: str, label: str = "") -> str:
+    """The text after the run emoji: title+model+elapsed while running, else cause/elapsed.
+
+    The opaque ``task_id`` never appears here: a reader wants to know *what* is
+    running and *how long* it has been running, not an internal reference.
+    """
     if status in _RUNNING:
-        refs = _join(phase.get("task_id") or phase.get("run_id"))
         serving = str(phase.get("model") or model or "").strip()
-        return _join(refs, serving)
+        head = _join(label, serving)
+        elapsed = str(phase.get("elapsed") or "").strip()
+        return f"{head} ({elapsed})" if head and elapsed else head
     if status == "done":
         return _cut(phase.get("duration"), DEFAULT_MAX_CAUSE_CHARS)
     if status in _RUN_CAUSE:
@@ -245,9 +318,9 @@ def _review_extra(status: str, phase: dict[str, Any]) -> str:
     return ""
 
 
-def _row_extra(name: str, status: str, phase: dict[str, Any], model: str) -> str:
+def _row_extra(name: str, status: str, phase: dict[str, Any], model: str, label: str = "") -> str:
     if name == "run":
-        return _run_extra(status, phase, model)
+        return _run_extra(status, phase, model, label)
     if name == "review":
         return _review_extra(status, phase)
     if name == "dispatch" and status in _RUN_CAUSE:
@@ -255,12 +328,12 @@ def _row_extra(name: str, status: str, phase: dict[str, Any], model: str) -> str
     return ""
 
 
-def _render_row(phase: dict[str, Any], model: str) -> str:
+def _render_row(phase: dict[str, Any], model: str, label: str = "") -> str:
     name = str(phase.get("name") or "?").strip().lower() or "?"
     status = str(phase.get("status") or "pending").strip().lower()
     emoji = STATUS_EMOJI.get(status, STATUS_EMOJI["pending"])
     row = f"- {name} {emoji}"
-    extra = _row_extra(name, status, phase, model)
+    extra = _row_extra(name, status, phase, model, label)
     if extra:
         row = f"{row} {extra}"
     return row
@@ -311,10 +384,15 @@ def render_block(block: dict[str, Any], *, row_budget: int | None = None) -> str
     limit = int(block.get("label_limit") or DEFAULT_LABEL_CHARS)
     label = str(block.get("label") or "").strip()
     if not label:
-        label = condense_label(block.get("process") or block.get("goal"), limit)
+        label = condense_label(block.get("process") or block.get("goal"), limit, title=block.get("title"))
     display = str(block.get("display") or "").strip() or str(block.get("agent") or "?").strip() or "?"
     model = str(block.get("model") or "").strip()
     header = _join(label, display) or "?"
+    # The run row names the work itself, never the header's ticket again: just
+    # the title, word-cut to the activity budget so it never blows the line.
+    row_label = _cut(
+        _title_only(block.get("process") or block.get("goal"), block.get("title")), DEFAULT_MAX_ACTIVITY_CHARS
+    )
 
     phases = [p for p in (block.get("phases") or []) if isinstance(p, dict)]
     visible = phases if row_budget is None else phases[: max(0, row_budget)]
@@ -325,7 +403,7 @@ def render_block(block: dict[str, Any], *, row_budget: int | None = None) -> str
         status = str(phase.get("status") or "pending").strip().lower()
         if not _row_visible(name, status, block):
             continue
-        lines.append(_render_row(phase, model))
+        lines.append(_render_row(phase, model, row_label))
         activity = _activity_line(phase, block)
         if activity:
             lines.append(activity)

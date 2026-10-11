@@ -89,6 +89,11 @@ class Worker:
     agent_name: str
     task: str
     chain: tuple[str, ...]
+    # Optional, caller-declared: the work's own short name (e.g. "Add a
+    # 'provider unusable' hop reason"). When present it is what the live
+    # status message's label and cycling line name instead of a derived
+    # fragment of the raw task text.
+    title: str = ""
     model: str | None = None
     status: str = PENDING
     handle: Any = None
@@ -118,6 +123,8 @@ class Worker:
             "model": self.model,
             "run_id": self.run_id,
         }
+        if self.title:
+            row["title"] = self.title
         if self.task_id:
             row["task_id"] = self.task_id
         # The read path surfaces the result a finished worker produced, so a caller

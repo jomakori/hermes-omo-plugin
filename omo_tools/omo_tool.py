@@ -29,6 +29,13 @@ OMO_SCHEMA: dict[str, Any] = {
                 "description": "Dispatch a task or graph, inspect runs, render a run tree, or cancel a run.",
             },
             "goal": {"type": "string", "description": "The task to accomplish (single-task dispatch)."},
+            "title": {
+                "type": "string",
+                "description": (
+                    "Optional short name for the work (a few words). Shown on the live status "
+                    "message instead of a fragment derived from the goal."
+                ),
+            },
             "tasks": {
                 "type": "array",
                 "description": (
@@ -42,6 +49,13 @@ OMO_SCHEMA: dict[str, Any] = {
                         "agent": {"type": "string", "description": "Target agent or role name."},
                         "category": {"type": "string", "description": "Category worker instead of agent."},
                         "prompt": {"type": "string", "description": "The task, with success criteria."},
+                        "title": {
+                            "type": "string",
+                            "description": (
+                                "Optional short name for the work (a few words). Shown on the "
+                                "live status message instead of a fragment derived from the prompt."
+                            ),
+                        },
                         "depends_on": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -149,6 +163,7 @@ def make_omo_handler(engine: Any) -> Callable[..., Any]:
                                     "agent": params.get("agent"),
                                     "category": params.get("category"),
                                     "prompt": goal,
+                                    "title": params.get("title"),
                                 }
                             ],
                             goal=goal,
@@ -167,6 +182,7 @@ def make_omo_handler(engine: Any) -> Callable[..., Any]:
                     category=params.get("category"),
                     context=params.get("context"),
                     background=bool(params.get("background", False)),
+                    title=params.get("title"),
                 )
             )
         if action == "status":

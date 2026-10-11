@@ -163,6 +163,29 @@ def test_graph_runs_dependents_after_their_dependency():
     assert "depends: explore" in payload["tree"]
 
 
+def test_a_titled_task_carries_the_title_into_run_created_and_worker_events():
+    # The optional title travels with the declared task: run_created names it for
+    # the block header, and every later worker event keeps it for the live rows.
+    lifecycle = ScriptedLifecycle()
+    engine = make_engine(lifecycle)
+    engine.dispatch_graph(
+        tasks=[
+            {
+                "id": "t1",
+                "agent": "hephaestus",
+                "prompt": "OMR-11 (repo /x): do the thing",
+                "title": "Add a provider-unusable hop reason",
+            }
+        ],
+        goal="OMR-11 (repo /x): do the thing",
+    )
+    events = engine._ctx.events
+    created = next(payload for event, payload in events if event == "run_created")
+    assert created["workers"][0]["title"] == "Add a provider-unusable hop reason"
+    started = next(payload for event, payload in events if event == "task_started")
+    assert started["title"] == "Add a provider-unusable hop reason"
+
+
 def test_graph_runs_independent_tasks_in_parallel():
     lifecycle = ScriptedLifecycle(delay=0.05)
     engine = make_engine(lifecycle)

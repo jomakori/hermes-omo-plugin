@@ -279,6 +279,7 @@ class OmoEngine:
         context: str | None = None,
         background: bool = False,
         parent_agent: str | None = None,
+        title: str | None = None,
     ) -> dict[str, Any]:
         name, chain, routed_by = self._resolve_dispatch_target(
             goal=goal, target=target, category=category, parent_agent=parent_agent
@@ -288,7 +289,14 @@ class OmoEngine:
         # Stamp the run with the session that is paying for it, so a later read or
         # cancel from another session can be told apart from the owner's.
         run = Run(run_id=run_id, goal=goal, session_id=session.current_session_id())
-        worker = Worker(run_id=run_id, agent_name=name, task=goal, chain=chain, model=chain[0] if chain else None)
+        worker = Worker(
+            run_id=run_id,
+            agent_name=name,
+            task=goal,
+            chain=chain,
+            title=str(title or "").strip(),
+            model=chain[0] if chain else None,
+        )
         run.workers.append(worker)
         # Observation only: Jev runs beside the resolved decision and never feeds
         # back into it. Written once the run exists, so the outcome recorded when
@@ -497,6 +505,7 @@ class OmoEngine:
             "agent": worker.agent_name,
             "task_id": worker.task_id,
             "task": worker.task,
+            "title": worker.title,
             "run_ref": worker.task_id or run.run_id,
             "status": worker.status,
             "display": self._display(worker.agent_name),
