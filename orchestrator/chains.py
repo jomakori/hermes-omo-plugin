@@ -25,6 +25,13 @@ HOP_REASON_BILLING = "billing"
 # engine.py) without changing behaviour for the billing bucket, whose
 # counting is deliberately left as-is.
 HOP_REASON_PROVIDER_UNUSABLE = "provider_unusable"
+# A worker whose process exited cleanly but whose claimed branch / PR / commit
+# could not be found on the remote (see orchestrator/artifact_verify.py). It is
+# never produced by `classify_failure_reason`: no provider failed, the hop
+# served the request. It names the one thing a plain SUCCEEDED cannot say —
+# that nobody confirmed the work exists — so a reader is not handed a claim as
+# though the host had watched it happen.
+HOP_REASON_UNVERIFIABLE = "unverifiable"
 
 _RETRYABLE_PATTERN = re.compile(
     r"rate.?limit|quota|overloaded|too many requests|temporarily unavailable|"

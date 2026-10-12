@@ -99,6 +99,23 @@ def result_payload(result: Any, status: str | None = None) -> Any:
     return fields or {"value": str(result)}
 
 
+def unverified_marker(verification: dict[str, Any] | None) -> dict[str, Any]:
+    """The explicit marker a result carries when a claimed artifact failed to verify.
+
+    A worker's SUCCEEDED says its process exited cleanly; it says nothing about
+    whether the branch or PR its summary names was ever pushed (see
+    ``orchestrator.artifact_verify``). When a claim was made and could not be
+    confirmed, the result says so in its own fields rather than reading as a
+    plain success. A worker that claimed nothing is never marked: there is no
+    claim to be wrong about.
+    """
+    if not verification or not verification.get("verifiable"):
+        return {}
+    if verification.get("verified"):
+        return {}
+    return {"verified": False, "verification": dict(verification)}
+
+
 @dataclass
 class Worker:
     run_id: str
@@ -129,6 +146,11 @@ class Worker:
     # names no session, so the profile's newest session at launch is pinned here).
     # The status line reads the worker's live tool call from it.
     activity_session: str | None = None
+    # The artifact-verification report for a finished worker (see
+    # ``orchestrator.artifact_verify``): whether it claimed a branch/PR/commit at
+    # all, and whether each one was actually found. Empty until the worker
+    # finishes, and left empty for a worker that claimed nothing.
+    verification: dict[str, Any] = field(default_factory=dict)
 
     def as_row(self) -> dict[str, Any]:
         spec = agent(self.agent_name)
@@ -147,7 +169,13 @@ class Worker:
         # polling a background run can read it back. It is deliberately not in
         # `to_dict`: the durable record survives a restart, a result object does not.
         if self.result is not None:
-            row["result"] = result_payload(self.result, status=self.status)
+            payload = result_payload(self.result, status=self.status)
+            marker = unverified_marker(self.verification)
+            if marker and isinstance(payload, dict):
+                # A claimed branch/PR nobody could find must not read as a plain
+                # success: the marker travels with the result the caller reads.
+                payload = {**payload, **marker}
+            row["result"] = payload
         if self.depends_on:
             row["depends_on"] = list(self.depends_on)
         if self.parent_id:
