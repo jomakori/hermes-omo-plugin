@@ -61,13 +61,26 @@ _RESULT_FIELDS = (
 )
 
 
-def result_payload(result: Any) -> Any:
+# A succeeded worker's summary reads like a report of work the host watched
+# happen; it is the worker narrating itself (see ``orchestrator.boundary``:
+# `result.summary` is SELF_REPORTED). Terminal success is decided on the host's
+# `terminal_state` alone and never cross-checks the text, so the payload says in
+# the value itself that nobody verified it.
+UNVERIFIED_CLAIM_PREFIX = "[unverified worker claim] "
+
+
+def result_payload(result: Any, status: str | None = None) -> Any:
     """The readable form of a finished worker's result for a status/tree payload.
 
     The registry holds the host's result object as-is; a caller polling a
     background run needs its content, not an opaque repr. A dict result passes
     through untouched; a host object is narrowed to the fields a claim_boundary
     can name, so a lost result is never mistaken for a run that produced nothing.
+
+    ``status`` is the worker's own status. On a SUCCEEDED worker the summary is
+    prefixed with ``UNVERIFIED_CLAIM_PREFIX``: success says the process exited
+    well, not that the narrative is true. A failed or cancelled run already reads
+    as unproven, so its summary is left alone.
     """
     if result is None:
         return None
@@ -79,7 +92,10 @@ def result_payload(result: Any) -> Any:
         if value is None:
             continue
         # An enum (e.g. a terminal state) renders as its name, not ``<Enum.x: 1>``.
-        fields[name] = getattr(value, "name", value)
+        value = getattr(value, "name", value)
+        if name == "summary" and status == SUCCEEDED and isinstance(value, str):
+            value = f"{UNVERIFIED_CLAIM_PREFIX}{value}"
+        fields[name] = value
     return fields or {"value": str(result)}
 
 
@@ -131,7 +147,7 @@ class Worker:
         # polling a background run can read it back. It is deliberately not in
         # `to_dict`: the durable record survives a restart, a result object does not.
         if self.result is not None:
-            row["result"] = result_payload(self.result)
+            row["result"] = result_payload(self.result, status=self.status)
         if self.depends_on:
             row["depends_on"] = list(self.depends_on)
         if self.parent_id:
