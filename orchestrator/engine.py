@@ -13,9 +13,9 @@ from orchestrator import session
 from orchestrator.boundary import claim_boundary
 from orchestrator.chains import (
     HOP_REASON_PROVIDER_UNUSABLE,
-    HOP_REASON_SUCCESS,
     classify_failure_reason,
     client_disconnected,
+    render_hop_trail,
     status_from_message,
 )
 from orchestrator.guards import GuardError, check_delegation
@@ -523,22 +523,12 @@ class OmoEngine:
 
     @staticmethod
     def _hop_note(worker: Worker) -> str:
-        """The last *failed* hop of the chain walk, as ``model (reason)``.
+        """The whole chain walk, in order, as ``model (reason) -> model (reason)...``.
 
-        Empty when the primary served the work. Only a hop that was actually
-        dropped for a non-success reason is named — a success entry says nothing
-        the reader needs.
+        Empty when the primary served the work outright. See
+        ``orchestrator.chains.render_hop_trail`` for the exact format.
         """
-        for hop in reversed(worker.hop_history):
-            if not isinstance(hop, dict):
-                continue
-            reason = str(hop.get("reason") or "").strip()
-            if not reason or reason == HOP_REASON_SUCCESS:
-                continue
-            model = str(hop.get("model") or "").strip()
-            human = reason.replace("_", " ")
-            return f"{model} ({human})" if model else f"({human})"
-        return ""
+        return render_hop_trail(worker.hop_history)
 
     def _capture_activity_session(self, worker: Worker) -> None:
         """Pin the child session whose live tool call the status line reads.

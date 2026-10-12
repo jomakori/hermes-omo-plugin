@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from orchestrator import session
 from orchestrator.boundary import claim_boundary
-from orchestrator.chains import HOP_REASON_SUCCESS
+from orchestrator.chains import render_hop_trail
 from orchestrator.guards import GuardError
 from orchestrator.models import (
     BLOCKED,
@@ -39,17 +39,12 @@ REVIEW_INSTRUCTION = (
 
 
 def _hop_note(worker: Worker) -> str:
-    """The last *failed* hop of the chain walk, as ``model (reason)`` (or "")."""
-    for hop in reversed(worker.hop_history):
-        if not isinstance(hop, dict):
-            continue
-        reason = str(hop.get("reason") or "").strip()
-        if not reason or reason == HOP_REASON_SUCCESS:
-            continue
-        model = str(hop.get("model") or "").strip()
-        human = reason.replace("_", " ")
-        return f"{model} ({human})" if model else f"({human})"
-    return ""
+    """The whole chain walk, in order, as ``model (reason) -> model (reason)...``.
+
+    Empty when the primary served the work outright. See
+    ``orchestrator.chains.render_hop_trail`` for the exact format.
+    """
+    return render_hop_trail(worker.hop_history)
 
 
 class TaskGraph:

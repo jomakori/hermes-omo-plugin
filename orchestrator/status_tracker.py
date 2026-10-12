@@ -401,7 +401,10 @@ class StatusTracker:
                     "review": state.review,
                     "model": run_phase.model,
                     "activity": activity,
-                    "hop": block.hop if run_phase.status == "current" else "",
+                    # The whole chain-walk trail, not gated to "current": a fallback
+                    # cascade is exactly the kind of thing a reader wants to see
+                    # *after* the worker has settled, not only while it is live.
+                    "hop": block.hop,
                     "phases": phases,
                 }
             )
@@ -491,9 +494,14 @@ class StatusTracker:
             run.cause = "cancelled" if status == "cancelled" else ""
         else:
             run.cause = cause
-        # The worker is no longer live: its activity and hop must not linger.
+        # The worker is no longer live: its tool-call activity must not linger.
+        # The chain-walk trail is the opposite — it is exactly what a reader
+        # wants to see *after* the fact — so it is refreshed from the final
+        # payload (which carries the whole walk) rather than cleared.
         block.activity = ""
-        block.hop = ""
+        hop = str(payload.get("hop") or "").strip()
+        if hop:
+            block.hop = hop
 
 
 def _display_for(agent_name: str) -> str:
@@ -613,8 +621,10 @@ def _h_run_finished(tracker: StatusTracker, state: _RunState, payload: dict[str,
         run = block.phase("run")
         if run.status in ("pending", "current"):
             run.status = "done" if overall == "done" else overall
+        # Only the live tool-call activity is scrubbed here: the hop trail
+        # (set by the worker's own terminal event, if any) must survive a
+        # run_finished sweep exactly as it survives `_finish`.
         block.activity = ""
-        block.hop = ""
     state.terminal = True
 
 

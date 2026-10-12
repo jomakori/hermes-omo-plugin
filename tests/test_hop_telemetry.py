@@ -19,7 +19,15 @@ from orchestrator.chains import (
     HOP_REASON_TRANSPORT,
     FallbackState,
     classify_failure_reason,
+    render_hop_trail,
 )
+
+# A three-element chain so OMR-7bdff246 (the full-trail render) has a real walk to
+# exercise end to end, not just the two-hop billing/quota cases above.
+THREE_HOP_CHAIN = {
+    "chains": {"explore": ["claude-opus-5", "copilot-sonnet-5.5", "deepseek-v4-flash-direct"]},
+    "runtime_fallback": {"retry_on_errors": [402, 429, 500]},
+}
 
 # The two credit bodies this stack actually receives: a LiteLLM model group whose
 # upstream balance is gone, and the DeepSeek direct API's own balance error.
@@ -177,3 +185,37 @@ def test_the_walk_records_both_outcomes_in_order():
         {"model": "cheap-model", "reason": HOP_REASON_BILLING},
         {"model": "premium-model", "reason": HOP_REASON_SUCCESS},
     ]
+
+
+# ── OMR-7bdff246: the full chain-walk trail, not just the last failed hop ──
+
+
+def test_a_three_hop_walk_renders_all_three_in_order_with_reasons():
+    lifecycle = ResultLifecycle(["429 rate limit exceeded", QUOTA_ERROR, ""])
+    _, engine = make_engine(lifecycle, THREE_HOP_CHAIN)
+    out = engine.dispatch(goal="scan the repo", target="explore")
+
+    assert lifecycle.launched == ["claude-opus-5", "copilot-sonnet-5.5", "deepseek-v4-flash-direct"]
+    assert out["status"] == "succeeded"
+    assert out["model"] == "deepseek-v4-flash-direct"
+    assert out["hop_history"] == [
+        {"model": "claude-opus-5", "reason": HOP_REASON_RATE_LIMIT},
+        {"model": "copilot-sonnet-5.5", "reason": HOP_REASON_PROVIDER_UNUSABLE},
+        {"model": "deepseek-v4-flash-direct", "reason": HOP_REASON_SUCCESS},
+    ]
+    # The full trail renders every hop, in order, naming which one served.
+    assert render_hop_trail(out["hop_history"]) == (
+        "claude-opus-5 (rate limit) → copilot-sonnet-5.5 (provider unusable) → deepseek-v4-flash-direct (served)"
+    )
+
+
+def test_a_single_hop_primary_served_run_has_no_hop_trail():
+    _, engine = make_engine(FakeLifecycle(), THREE_HOP_CHAIN)
+    out = engine.dispatch(goal="scan the repo", target="explore")
+
+    assert out["status"] == "succeeded"
+    assert render_hop_trail(out["hop_history"]) == ""
+    row = engine.status(out["run_id"])["workers"][0]
+    # The primary of THREE_HOP_CHAIN is the chain's first element: no walk
+    # happened, so the single entry is simply that model's exit point.
+    assert row["hop_history"] == [{"model": "claude-opus-5", "reason": HOP_REASON_SUCCESS}]

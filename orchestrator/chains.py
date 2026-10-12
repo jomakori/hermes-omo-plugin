@@ -201,6 +201,41 @@ class FallbackState:
         return None
 
 
+# The separator joining hops in a rendered trail. Exported so the renderer
+# (orchestrator.status_message) can degrade a too-long trail by dropping whole
+# hops on this boundary rather than word-cutting a model name in half.
+HOP_ARROW = " → "
+
+
+def render_hop_trail(hop_history: Sequence[Mapping[str, Any]]) -> str:
+    """The whole chain walk, in order, as ``model (reason) → model (reason) → ...``.
+
+    Every hop that was tried rides here, not just the last failed one: a
+    cascade is only legible after the fact if the row says which models were
+    dropped, why, and which one finally answered. The hop that served is
+    spelled ``served`` rather than echoing the internal ``success`` token.
+
+    Empty when the walk never left the primary — a single hop that served the
+    request outright says nothing a reader needs — and empty for an empty
+    history. A worker whose primary failed with no further hop to try still
+    gets its one entry named: that failure *is* the worker's whole story.
+    """
+    hops = [hop for hop in hop_history if isinstance(hop, dict)]
+    if not hops:
+        return ""
+    if len(hops) == 1 and str(hops[0].get("reason") or "").strip() == HOP_REASON_SUCCESS:
+        return ""
+    parts: list[str] = []
+    for hop in hops:
+        reason = str(hop.get("reason") or "").strip()
+        if not reason:
+            continue
+        model = str(hop.get("model") or "").strip()
+        label = "served" if reason == HOP_REASON_SUCCESS else reason.replace("_", " ")
+        parts.append(f"{model} ({label})" if model else f"({label})")
+    return HOP_ARROW.join(parts)
+
+
 @dataclass
 class ChainResolver:
     config: Mapping[str, Any] = field(default_factory=dict)

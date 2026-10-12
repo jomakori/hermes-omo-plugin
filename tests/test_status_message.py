@@ -14,7 +14,9 @@ from orchestrator.status_message import (
     COMPACT_LABEL_CHARS,
     DEFAULT_LABEL_CHARS,
     DEFAULT_MAX_ACTIVITY_CHARS,
+    DEFAULT_MAX_HOP_CHARS,
     HEADER_PREFIX,
+    HOP_GLYPH,
     STATUS_EMOJI,
     condense_label,
     label_limit,
@@ -404,6 +406,49 @@ def test_hop_shares_the_canned_activity_line_too():
     block["hop"] = "glm-5.3 (billing)"
     text = render_block(block)
     assert "  ↳ cycling: patching components/shell.rs… (3s) · ⤵ glm-5.3 (billing)" in text
+
+
+# ── OMR-7bdff246: the full chain-walk trail survives past the worker's finish ──
+def test_three_hop_trail_renders_all_hops_in_order_on_a_settled_worker():
+    block = reviewed_block()
+    block["hop"] = (
+        "claude-opus-5 (rate limit) → copilot-sonnet-5.5 (provider unusable) → deepseek-v4-flash-direct (served)"
+    )
+    text = render_block(block)
+    # The run row is settled (done), so the trail gets its own line, not the
+    # activity line (there is no activity line on a done row).
+    assert (
+        "  ⤵ claude-opus-5 (rate limit) → copilot-sonnet-5.5 (provider unusable) → deepseek-v4-flash-direct (served)"
+    ) in text
+
+
+def test_a_single_hop_primary_served_run_has_no_hop_line_at_all():
+    block = reviewed_block()
+    block["hop"] = ""  # primary served: engine._hop_note returns "" for this case
+    text = render_block(block)
+    assert HOP_GLYPH not in text
+
+
+def test_hop_trail_degrades_to_fewer_hops_rather_than_overflow():
+    long_chain = " → ".join(f"model-{i}-with-a-rather-long-name (provider unusable)" for i in range(10))
+    long_chain += " → model-final (served)"
+    block = reviewed_block()
+    block["hop"] = long_chain
+    text = render_block(block)
+    hop_line = next(line for line in text.splitlines() if line.strip().startswith(HOP_GLYPH))
+    assert len(hop_line) <= len("  " + HOP_GLYPH + " ") + DEFAULT_MAX_HOP_CHARS
+    # Whole hops are dropped, oldest first — a model name is never cut mid-word.
+    assert "model-final (served)" in hop_line
+    assert not hop_line.rstrip().endswith("…")
+
+
+def test_rendered_hop_line_stays_within_the_overall_budget():
+    block = reviewed_block()
+    block["hop"] = (
+        "claude-opus-5 (rate limit) → copilot-sonnet-5.5 (provider unusable) → deepseek-v4-flash-direct (served)"
+    )
+    text = render_status(_run(block))
+    assert len(text) <= 2000
 
 
 # ── v3: T1b the label names the work, not the bare ticket ─────────────────────
