@@ -106,6 +106,28 @@ class GatewayStatusTransport:
         # Set by the last pin: True when Discord refused it because the channel's
         # pin cap is reached (30001), so the caller knows to evict and retry.
         self.last_pin_limit = False
+        # Resolution failures already named in the log. Every one of them is a
+        # silent no-op by design (a run must never fail because its progress
+        # message could not be sent), which is exactly why each needs to be said
+        # out loud once: an undelivered status message is otherwise invisible in
+        # the pod log. Once per reason per transport — loud enough to diagnose an
+        # outage, quiet enough not to become one on a long run's every edit.
+        self._warned: set[str] = set()
+
+    def _undeliverable(self, reason: str, run_key: str = "", detail: str = "") -> None:
+        """Name a resolution failure in the log; the caller still fails open."""
+        if reason in self._warned:
+            return
+        self._warned.add(reason)
+        logger.warning(
+            "OMO status message undeliverable (%s): run=%s platform=%s chat=%s thread=%s%s",
+            reason,
+            run_key or "-",
+            self.platform or "-",
+            self.chat_id or "-",
+            self.thread_id or "-",
+            f" detail={detail}" if detail else "",
+        )
 
     @property
     def usable(self) -> bool:
@@ -131,40 +153,44 @@ class GatewayStatusTransport:
         runner = self._runner_resolver()
         return getattr(runner, "_gateway_loop", None) if runner is not None else None
 
-    def _adapter(self) -> Any:
+    def _adapter(self, run_key: str = "") -> Any:
         runner = self._runner_resolver()
         if runner is None:
+            self._undeliverable("no live gateway runner", run_key)
             return None
         try:
             key = self._platform_key(self.platform) if self.platform else None
-        except Exception:
+        except Exception as exc:
+            self._undeliverable("unusable platform", run_key, detail=str(exc))
             return None
         if key is None:
+            self._undeliverable("unusable platform", run_key)
             return None
-        # Profile-aware, fail-closed: the same lookup the host's gated facade uses,
-        # so a plugin scoped to one profile never posts through another's bot.
         resolve = getattr(runner, "_authorization_adapter", None)
         if callable(resolve):
             try:
                 profile = self._profile_resolver()
-            except Exception:
+            except Exception as exc:
+                self._undeliverable("no adapter", run_key, detail=str(exc))
                 return None
             adapter = resolve(key, profile)
         else:
             adapters = getattr(runner, "adapters", None)
             if not isinstance(adapters, dict):
+                self._undeliverable("no adapter", run_key)
                 return None
             adapter = adapters.get(key)
         if adapter is None:
+            self._undeliverable("no adapter", run_key)
             return None
-        # Fail closed on a disconnected adapter, exactly as the host's own gated
-        # facade does (platform_actions._resolve_adapter): a call that cannot
-        # succeed is not worth making.
         try:
             connected = bool(adapter.is_connected)
         except Exception:
             connected = False
-        return adapter if connected else None
+        if not connected:
+            self._undeliverable("adapter not connected", run_key)
+            return None
+        return adapter
 
     def _metadata(self) -> dict[str, Any] | None:
         if self.thread_id:
@@ -173,7 +199,7 @@ class GatewayStatusTransport:
 
     async def post(self, run_key: str, text: str) -> str | None:
         """Send a fresh message; return its id, or None when it could not be sent."""
-        adapter = self._adapter()
+        adapter = self._adapter(run_key)
         if adapter is None:
             return None
         target = self._target
@@ -190,7 +216,7 @@ class GatewayStatusTransport:
 
     async def edit(self, run_key: str, message_id: str, text: str) -> bool:
         """Edit the existing message in place; False when it must be re-posted."""
-        adapter = self._adapter()
+        adapter = self._adapter(run_key)
         if adapter is None:
             self.last_gone = False
             return False
@@ -216,7 +242,7 @@ class GatewayStatusTransport:
         live message. A platform whose adapter has no ``delete_message`` (the base
         class returns False) simply keeps both copies.
         """
-        adapter = self._adapter()
+        adapter = self._adapter(run_key)
         if adapter is None or not message_id:
             return False
         delete_message: Any = getattr(adapter, "delete_message", None)
