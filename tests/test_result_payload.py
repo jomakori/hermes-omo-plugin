@@ -25,7 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from omo_tools.omo_tool import make_omo_handler  # noqa: E402
 from orchestrator.chains import ChainResolver  # noqa: E402
 from orchestrator.engine import OmoEngine  # noqa: E402
-from orchestrator.models import SUCCEEDED  # noqa: E402
+from orchestrator.models import FAILED, SUCCEEDED, UNVERIFIED_CLAIM_PREFIX, Worker  # noqa: E402
 
 
 @dataclasses.dataclass
@@ -138,7 +138,8 @@ def test_status_of_a_finished_background_run_exposes_the_result():
 
     assert row["status"] == SUCCEEDED
     assert "result" in row, "a finished run's result must survive the status read path"
-    assert row["result"]["summary"] == "did the work"
+    # A SUCCEEDED worker's summary is its own narration, so it is marked as such.
+    assert row["result"]["summary"] == f"{UNVERIFIED_CLAIM_PREFIX}did the work"
     # The structured payload and the host-observed fields are readable too — named
     # exactly as the claim_boundary names them.
     assert row["result"]["structured_payload"] == {"findings": ["okt180", "container"]}
@@ -154,7 +155,31 @@ def test_tree_action_of_a_finished_background_run_exposes_the_result():
 
     payload = json.loads(asyncio.run(make_omo_handler(engine)({"action": "tree", "run_id": out["run_id"]})))
 
-    assert payload["workers"][0]["result"]["summary"] == "did the work"
+    assert payload["workers"][0]["result"]["summary"] == f"{UNVERIFIED_CLAIM_PREFIX}did the work"
+
+
+def test_a_failed_workers_summary_is_not_marked_as_a_claim():
+    """A failed run already reads as unproven: no need to qualify its narration."""
+    worker = Worker(run_id="r1", agent_name="librarian", task="t", chain=())
+    worker.status = FAILED
+    worker.result = FakeResult(summary="did the work")
+
+    row = worker.as_row()
+
+    assert row["result"]["summary"] == "did the work"
+
+
+def test_non_summary_fields_are_untouched_on_a_succeeded_worker():
+    worker = Worker(run_id="r1", agent_name="librarian", task="t", chain=())
+    worker.status = SUCCEEDED
+    worker.result = FakeResult(summary="did the work", error_message="none")
+
+    row = worker.as_row()
+
+    assert row["result"]["structured_payload"] == {"findings": ["okt180", "container"]}
+    assert row["result"]["usage_metadata"] == {"total_tokens": 42}
+    assert row["result"]["terminal_state"] == "SUCCEEDED"
+    assert row["result"]["error_message"] == "none"
 
 
 def test_a_running_run_has_no_result_yet():
