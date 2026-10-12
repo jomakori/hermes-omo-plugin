@@ -10,9 +10,11 @@ from collections.abc import Callable
 from typing import Any
 
 from orchestrator import session
+from orchestrator.artifact_verify import COULD_NOT_CHECK, default_verifier, verification_for
 from orchestrator.boundary import claim_boundary
 from orchestrator.chains import (
     HOP_REASON_PROVIDER_UNUSABLE,
+    HOP_REASON_UNVERIFIABLE,
     classify_failure_reason,
     client_disconnected,
     render_hop_trail,
@@ -138,6 +140,41 @@ class OmoEngine:
         # candidate selection treats every agent/category as available (unprobed
         # is not evidence of dead — the same rule `alive_candidates` itself uses).
         self._health_cache: Any = None
+        # How a claimed branch / PR / commit gets checked (see
+        # orchestrator.artifact_verify). Injectable so a test can answer without
+        # git, gh or a network; production uses the subprocess verifier.
+        self.artifact_verifier: Any = None
+
+    def _verifier(self) -> Any:
+        if self.artifact_verifier is None:
+            self.artifact_verifier = default_verifier()
+        return self.artifact_verifier
+
+    def _verify_claimed_artifacts(self, worker: Worker) -> None:
+        """Record whether this worker's claimed artifacts actually exist.
+
+        Runs once per finished worker, and only on a clean exit: a FAILED or
+        cancelled worker already reads as unproven, so checking its narrative
+        would cost calls to prove something nobody was claiming. Fails open —
+        any failure of the check itself is recorded as "could not check" and
+        never changes the worker's status, because an unverifiable claim is not
+        evidence the work is missing. Nothing is re-dispatched here: work that
+        claims a branch may have half-landed, and a re-run risks a duplicate
+        branch or PR.
+        """
+        if worker.status != SUCCEEDED or worker.verification or worker.result is None:
+            return
+        if not bool(self._config("verify_claimed_artifacts", True)):
+            return
+        try:
+            worker.verification = verification_for(worker.result, self._verifier())
+        except Exception as exc:  # noqa: BLE001 - the gate must never fail the run
+            worker.verification = {
+                "verifiable": True,
+                "verified": False,
+                "reason": HOP_REASON_UNVERIFIABLE,
+                "detail": f"{COULD_NOT_CHECK}: {exc}",
+            }
 
     def _service(self) -> Any:
         if self._lifecycle is not None:
@@ -912,9 +949,12 @@ class OmoEngine:
     def _outcome(self, run: Run, worker: Worker) -> dict[str, Any]:
         # Every terminal transition of a worker funnels through here, so this is the
         # one checkpoint that matters: what the record says the worker got to.
+        # Check the claim before the record is written, so the stored row and the
+        # returned payload agree about whether anyone confirmed the work.
+        self._verify_claimed_artifacts(worker)
         self._record_outcome(worker, delivered=worker.status == SUCCEEDED)
         self._persist()
-        return {
+        payload: dict[str, Any] = {
             "run_id": run.run_id,
             "agent": AGENTS[worker.agent_name].display,
             "model": worker.model,
@@ -930,6 +970,11 @@ class OmoEngine:
             "tree": run.tree(),
             "claim_boundary": claim_boundary(),
         }
+        if worker.verification:
+            # The caller that dispatched synchronously reads this payload and never
+            # the row, so the verdict on its claimed branch/PR belongs here too.
+            payload["verification"] = dict(worker.verification)
+        return payload
 
     async def _run_worker(self, run: Run, worker: Worker, request: Any) -> None:
         if worker.cancel_requested:
