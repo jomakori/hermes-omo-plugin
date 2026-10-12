@@ -411,14 +411,15 @@ def test_engine_worker_running_payload_carries_model_display_and_session_key():
     assert "activity_session" in running
 
 
-def test_hop_note_names_only_a_failed_hop_with_its_reason():
+def test_hop_note_names_the_whole_walk_in_order():
     worker = Worker(run_id="omo_x", agent_name="hephaestus", task="t", chain=("a", "b"), model="glm-5.3")
     worker.hop_history = [
         {"model": "minimax-m3", "reason": "rate_limit"},
         {"model": "glm-5.3", "reason": "success"},
     ]
-    assert OmoEngine._hop_note(worker) == "minimax-m3 (rate limit)"
+    assert OmoEngine._hop_note(worker) == "minimax-m3 (rate limit) → glm-5.3 (served)"
 
+    # A single hop that served outright says nothing a reader needs.
     worker.hop_history = [{"model": "glm-5.3", "reason": "success"}]
     assert OmoEngine._hop_note(worker) == ""
 

@@ -49,6 +49,14 @@ serving model and the elapsed time, and is followed by the indented line carryin
 the worker's real tool call (or the canned rotating phrase naming the work), with
 a chain fallback named on the same line.
 
+The ``hop`` field is the *whole* chain walk, not just the last failed hop:
+``model (reason) → model (reason) → ... → model (served)``. While the run is
+live it rides the same indented line as the activity; once the worker has
+settled (done/failed/cancelled/...) it gets its own line under the run row, so
+a fallback cascade stays legible after the fact instead of vanishing the moment
+the worker finishes. Either way it degrades by dropping whole hops, oldest
+first, rather than ever word-cutting a model name.
+
 Truncation is always on a word boundary and never appends an ellipsis: the only
 rendered ellipsis is the deliberate ``…N more`` collapse marker, which never
 ends a line by itself.
@@ -59,6 +67,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from orchestrator.chains import HOP_ARROW
 from orchestrator.status_rotation import ROTATE_INTERVAL_SECONDS
 
 # One emoji per phase status. The set is fixed by the legend; an unknown status
@@ -92,6 +101,11 @@ COMPACT_LABEL_CHARS = 24
 FANOUT_COMPACT_THRESHOLD = 8
 DEFAULT_MAX_ACTIVITY_CHARS = 48
 DEFAULT_MAX_CAUSE_CHARS = 48
+# The chain-walk trail gets its own, larger budget: it shares no line with the
+# activity text once a worker has settled, and a 3+ hop cascade is exactly the
+# case this field exists to show in full. Degradation drops whole hops, oldest
+# first, rather than ever word-cutting a model name (see ``_bounded_hop``).
+DEFAULT_MAX_HOP_CHARS = 160
 
 # The tool-call line's own glyphs; the tool's emoji is resolved from the host
 # registry at runtime (see :func:`tool_emoji`), never from a hardcoded map.
@@ -123,6 +137,7 @@ __all__ = [
     "DEFAULT_MAX_CAUSE_CHARS",
     "DEFAULT_MAX_CHARS",
     "DEFAULT_MAX_GOAL_CHARS",
+    "DEFAULT_MAX_HOP_CHARS",
     "FANOUT_COMPACT_THRESHOLD",
     "HEADER_PREFIX",
     "HOP_GLYPH",
@@ -283,6 +298,28 @@ def _join(*parts: Any, sep: str = " · ") -> str:
     return sep.join(str(p).strip() for p in parts if str(p or "").strip())
 
 
+def _bounded_hop(hop: Any, limit: int) -> str:
+    """The hop trail, dropping whole hops (oldest first) until it fits `limit`.
+
+    A model name is never word-cut: a hop is shown whole or dropped entirely,
+    so a too-long trail degrades to fewer hops rather than overflowing the
+    line. Only if even the single most recent hop alone still overflows is it
+    cut on a word boundary (the rare, pathological case).
+    """
+    value = str(hop or "").strip()
+    if limit <= 0 or not value:
+        return ""
+    if len(value) <= limit:
+        return value
+    parts = value.split(HOP_ARROW)
+    while len(parts) > 1:
+        parts = parts[1:]
+        candidate = HOP_ARROW.join(parts)
+        if len(candidate) <= limit:
+            return candidate
+    return _cut(parts[-1], limit)
+
+
 def _run_extra(status: str, phase: dict[str, Any], model: str, label: str = "") -> str:
     """The text after the run emoji: title+model+elapsed while running, else cause/elapsed.
 
@@ -361,8 +398,31 @@ def _activity_line(phase: dict[str, Any], block: dict[str, Any]) -> str:
         line = f"  {ACTIVITY_GLYPH} cycling: {phrase} ({seconds}s)"
     hop = str(block.get("hop") or "").strip()
     if hop:
-        line = f"{line} · {HOP_GLYPH} {hop}"
+        bounded = _bounded_hop(hop, DEFAULT_MAX_HOP_CHARS)
+        if bounded:
+            line = f"{line} · {HOP_GLYPH} {bounded}"
     return line
+
+
+def _hop_trail_line(phase: dict[str, Any], block: dict[str, Any]) -> str:
+    """The standalone line naming the chain walk once the run has settled.
+
+    While the run is live the trail rides the activity line (see
+    ``_activity_line``); a settled run has no activity line to piggyback on,
+    so the trail gets its own indented line instead of vanishing the moment
+    the worker finishes.
+    """
+    name = str(phase.get("name") or "").strip().lower()
+    status = str(phase.get("status") or "").strip().lower()
+    if name != "run" or status in _RUNNING:
+        return ""
+    hop = str(block.get("hop") or "").strip()
+    if not hop:
+        return ""
+    bounded = _bounded_hop(hop, DEFAULT_MAX_HOP_CHARS)
+    if not bounded:
+        return ""
+    return f"  {HOP_GLYPH} {bounded}"
 
 
 def _row_visible(name: str, status: str, block: dict[str, Any]) -> bool:
@@ -407,6 +467,9 @@ def render_block(block: dict[str, Any], *, row_budget: int | None = None) -> str
         activity = _activity_line(phase, block)
         if activity:
             lines.append(activity)
+        trail = _hop_trail_line(phase, block)
+        if trail:
+            lines.append(trail)
 
     hidden = len(phases) - len(visible)
     if hidden > 0:
