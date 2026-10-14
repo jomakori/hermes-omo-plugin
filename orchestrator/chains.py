@@ -33,6 +33,136 @@ HOP_REASON_PROVIDER_UNUSABLE = "provider_unusable"
 # though the host had watched it happen.
 HOP_REASON_UNVERIFIABLE = "unverifiable"
 
+# --- provider quota benches -------------------------------------------------
+#
+# A drained subscription window belongs to the provider, not to one alias:
+# claude-sonnet-5 and claude-haiku-4-5 report the same five-hour reset, so
+# benching whichever alias failed first just hands the refusal to its sibling.
+# These benches are keyed by provider and held at module level, so they are
+# shared across walks: the next dispatch starts already benched rather than
+# paying for the same dead hop again. Expiry is the only thing that lifts one.
+
+_PROVIDER_BENCH: dict[str, float] = {}
+
+# "You've hit your session limit - resets 10:30am (UTC)": the proxy's own words.
+_RESET_CLOCK_PATTERN = re.compile(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m", re.IGNORECASE)
+# The same fact when the body carries it machine-readably.
+_RESETS_AT_PATTERN = re.compile(r"resets?_?at[\"\s:=]+(\d{10,})", re.IGNORECASE)
+
+# A quota refusal that states no reset (Copilot's monthly `quota_exceeded`) is
+# benched for a bounded window rather than a guessed one: writing the seat off
+# for a month would forfeit it if the window reopened sooner, so the provider
+# comes back on its own and the next attempt that reaches it re-probes it.
+BOUNDED_BENCH_SECONDS = 900.0
+
+# No subscription window runs longer than hours; a parsed clock further out is
+# a misread, not a schedule.
+MAX_BENCH_SECONDS = 6 * 3600.0
+
+# Aliases that bill to one upstream. A prefix is enough: claude-sonnet-5 and
+# claude-haiku-4-5 are one seat, copilot-* another, deepseek-* a third.
+_PROVIDER_ALIASES = ("claude", "copilot", "deepseek")
+
+
+def provider_of(model: str) -> str:
+    """The upstream a model alias bills to - one drained window covers them all."""
+    alias = (canonical_model(model) or "").split("/")[-1].lower()
+    for prefix in _PROVIDER_ALIASES:
+        if alias.startswith(prefix):
+            return prefix
+    return alias
+
+
+def reset_at(message: str | None, *, now: float | None = None) -> float | None:
+    """When a refusal says its window refills, or None when it does not say.
+
+    Read from the message on every refusal, never cached: Claude's five-hour
+    window rolls, so its reset moves with it (00:30, 05:30 and 10:30 UTC have
+    all been observed in one day). Reading it fresh is what keeps the bench
+    honest; a stored value would expire a live window early or late.
+    """
+    text = message or ""
+    stamped = _RESETS_AT_PATTERN.search(text)
+    if stamped:
+        epoch = float(stamped.group(1))
+        if epoch > 0:
+            return epoch
+
+    clock = _RESET_CLOCK_PATTERN.search(text)
+    if not clock:
+        return None
+    current = time.time() if now is None else now
+    hour = int(clock.group(1)) % 12
+    minute = int(clock.group(2) or 0)
+    if clock.group(3).lower() == "p":
+        hour += 12
+
+    # The message states a UTC clock, so build the candidate from the UTC date.
+    utc = time.gmtime(current)
+    midnight = current - (utc.tm_hour * 3600 + utc.tm_min * 60 + utc.tm_sec)
+    candidate = midnight + hour * 3600 + minute * 60
+    if candidate <= current:
+        # Already past: the next occurrence of that clock time is the one meant.
+        candidate += 86400
+    # A reading further out than any subscription window is a misread, so treat
+    # it as "no timestamp" and let the bounded bench handle it.
+    return candidate if candidate - current <= MAX_BENCH_SECONDS else None
+
+
+def _seat_is_drained(reason: str | None) -> bool:
+    """True when a hop's reason says the account itself is out, not this hop.
+
+    A rate limit is deliberately absent. A bare 429 is usually a momentary
+    spike that says nothing about the subscription, and taking a whole provider
+    out for one would over-reach. When a rate limit *is* a drained window, the
+    refusal names its reset and is benched on that evidence instead.
+    """
+    return str(reason or "") in (HOP_REASON_PROVIDER_UNUSABLE, HOP_REASON_BILLING)
+
+
+def bench_provider(provider: str, until: float, *, now: float | None = None) -> None:
+    """Hold a provider out of every chain until `until`."""
+    current = time.time() if now is None else now
+    if not provider or until <= current:
+        return
+    # The longer window wins: a short bounded bench must never shorten a reset
+    # the provider itself has already stated.
+    if until > _PROVIDER_BENCH.get(provider, 0.0):
+        _PROVIDER_BENCH[provider] = until
+
+
+def provider_benched_until(provider: str, *, now: float | None = None) -> float | None:
+    """When this provider may be tried again, or None when it is not benched."""
+    current = time.time() if now is None else now
+    until = _PROVIDER_BENCH.get(provider)
+    if until is None or until <= current:
+        _PROVIDER_BENCH.pop(provider, None)
+        return None
+    return until
+
+
+def provider_benched(model: str, *, now: float | None = None) -> bool:
+    """True while the provider behind this alias is held out."""
+    return provider_benched_until(provider_of(model), now=now) is not None
+
+
+def skip_benched(chain: Sequence[str], *, now: float | None = None) -> tuple[str, ...]:
+    """The chain minus every candidate whose provider is benched.
+
+    Applied as each walk is built, so a bench that has expired is simply absent
+    from the next walk's chain and recovery needs no separate scheduler. With
+    everything benched the chain is returned untouched: there is no live hop to
+    move to, and one refusal says so more cheaply than a hard stop.
+    """
+    models = tuple(chain)
+    return tuple(model for model in models if not provider_benched(model, now=now)) or models
+
+
+def clear_bench() -> None:
+    """Drop every bench (tests only)."""
+    _PROVIDER_BENCH.clear()
+
+
 _RETRYABLE_PATTERN = re.compile(
     r"rate.?limit|quota|overloaded|too many requests|temporarily unavailable|"
     r"service unavailable|bad gateway|gateway timeout",
@@ -186,6 +316,10 @@ class FallbackState:
         return is_retryable(status=status, error_type=error_type, message=message, retry_on_errors=self.retry_on_errors)
 
     def in_cooldown(self, model: str, now: float | None = None) -> bool:
+        # Provider benches are applied once, when the walk's chain is built
+        # (`skip_benched`), rather than re-consulted per hop: a walk that has
+        # started is allowed to finish, and a bench that lifts mid-walk is
+        # picked up by the next walk instead of by a half-advanced one.
         until = self.cooldowns.get(model)
         current = time.time() if now is None else now
         return until is not None and current < until
@@ -207,12 +341,32 @@ class FallbackState:
             return candidate
         return None
 
-    def record_failure(self, model: str, *, now: float | None = None, reason: str | None = None) -> None:
-        """Bench the model and record why this hop was abandoned."""
+    def record_failure(
+        self,
+        model: str,
+        *,
+        now: float | None = None,
+        reason: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Bench the model and record why this hop was abandoned.
+
+        When the reason says the seat itself is unusable, the bench widens from
+        this alias to its whole provider and lasts as long as the refusal says:
+        the reset it names, or a bounded window when it names none.
+        """
         current = time.time() if now is None else now
         self.cooldowns[model] = current + self.cooldown_seconds
         if reason:
             self.hop_history.append({"model": model, "reason": reason})
+        # Two things bench a whole provider, and both are evidence the drain
+        # belongs to the provider rather than to this hop: a refusal that names
+        # when its window refills (Claude's rolling five hours), or one that
+        # says the account is out with no time attached (a quota drain). A bare
+        # 429 is neither, so it stays a cooldown on the one model.
+        reset = reset_at(message, now=current)
+        if reset is not None or _seat_is_drained(reason):
+            bench_provider(provider_of(model), reset or (current + BOUNDED_BENCH_SECONDS), now=current)
 
     def record_success(self, model: str) -> None:
         """Record the hop that served the request — where this walk exited."""
@@ -285,7 +439,9 @@ class ChainResolver:
             return self.config.get(key, fallback)
 
         return FallbackState(
-            chain=self.chain_for(name, default),
+            # Built per walk, so a bench that has expired is already absent from
+            # this chain and the provider returns to it without any scheduler.
+            chain=skip_benched(self.chain_for(name, default)),
             enabled=bool(knob("enabled", True)),
             retry_on_errors=parse_retry_on_errors(knob("retry_on_errors", None)),
             max_attempts=int(knob("max_fallback_attempts", 3)),
