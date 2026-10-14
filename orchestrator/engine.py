@@ -744,9 +744,9 @@ class OmoEngine:
             reason = classify_failure_reason(status=status_from_message(error), message=error)
             last_reason = reason
             if not state.retryable(status=status_from_message(error), message=error):
-                state.record_failure(request.model or "", reason=reason)
+                state.record_failure(request.model or "", reason=reason, message=error)
                 break
-            state.record_failure(request.model or "", reason=reason)
+            state.record_failure(request.model or "", reason=reason, message=error)
             next_model = state.next_model()
             if next_model is None:
                 break
