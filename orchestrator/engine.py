@@ -17,6 +17,7 @@ from orchestrator.chains import (
     HOP_REASON_UNVERIFIABLE,
     classify_failure_reason,
     client_disconnected,
+    provider_exhausted,
     render_hop_trail,
     status_from_message,
 )
@@ -903,9 +904,13 @@ class OmoEngine:
         # state can be FAILED (e.g. the provider rejected the model) while the
         # handle-side status still reads succeeded. Trust the child's own state.
         state = getattr(result, "terminal_state", None)
-        if state is None:
-            return False
-        return "FAILED" in str(getattr(state, "name", state)).upper()
+        if state is not None and "FAILED" in str(getattr(state, "name", state)).upper():
+            return True
+        # A turn the harness could not serve closes as *succeeded* with the failure
+        # only in its summary ("No reply: every provider in the fallback chain kept
+        # failing over"). Read as a success it ends the walk where the outage is and
+        # leaves the chain inert, so the hop must advance to its next model instead.
+        return provider_exhausted(str(getattr(result, "summary", "") or ""))
 
     def _artifact_failure(self, worker: Worker) -> str:
         """The brief's unmet deliverables, or "" when satisfied."""

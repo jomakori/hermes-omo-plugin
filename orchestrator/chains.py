@@ -52,6 +52,13 @@ _BILLING_PATTERN = re.compile(
 # it is not the same claim a credits-out body makes.
 _PROVIDER_UNUSABLE_PATTERN = re.compile(r"quota_exceeded", re.IGNORECASE)
 
+# The harness can close a turn it could not serve as a *succeeded* child, with
+# the failure carried only in the summary text ("No reply: every provider in the
+# fallback chain kept failing over" - agent/turn_explainers.py). Behind that hop
+# nothing answered, so the walk must treat it as a provider failure and continue
+# to its next (credit-independent) model rather than accepting an empty turn.
+_NO_REPLY_PATTERN = re.compile(r"no reply|kept failing over", re.IGNORECASE)
+
 _VARIANT_SUFFIXES = ("-thinking", "-max", "-high", "-medium", "-low", "-xhigh")
 
 _STATUS_IN_MESSAGE = re.compile(r"\b(?:HTTP\s*)?([45]\d{2})\b")
@@ -89,6 +96,8 @@ def classify_failure_reason(*, status: int | None = None, error_type: str | None
         return HOP_REASON_SEMANTIC
     if _PROVIDER_UNUSABLE_PATTERN.search(message or ""):
         return HOP_REASON_PROVIDER_UNUSABLE
+    if provider_exhausted(message):
+        return HOP_REASON_PROVIDER_UNUSABLE
     if status == 402 or _BILLING_PATTERN.search(message or ""):
         return HOP_REASON_BILLING
     if status == 429:
@@ -114,6 +123,11 @@ def client_disconnected(message: str | None) -> bool:
     return bool(_CLIENT_DISCONNECT_PATTERN.search(message or ""))
 
 
+def provider_exhausted(message: str | None) -> bool:
+    """True when the failure says no provider behind the hop had an answer left."""
+    return bool(_NO_REPLY_PATTERN.search(message or ""))
+
+
 def canonical_model(model: str) -> str:
     base = model.rsplit("/", 1)[-1]
     for suffix in _VARIANT_SUFFIXES:
@@ -133,6 +147,8 @@ def is_retryable(
         return False
     codes = retry_on_errors if retry_on_errors is not None else RETRYABLE_STATUS
     if status is not None and status in codes:
+        return True
+    if provider_exhausted(message):
         return True
     return bool(_RETRYABLE_PATTERN.search(message or ""))
 
