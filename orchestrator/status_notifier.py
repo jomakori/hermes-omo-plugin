@@ -27,6 +27,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import TimeoutError as _FutureTimeoutError
 from typing import Any
 
 from orchestrator.status_tracker import Action, StatusTracker
@@ -40,6 +41,15 @@ DEFAULT_TICK_SECONDS = 1.0
 # How long to wait for one delivery to finish on the gateway loop. A status edit
 # is not worth stalling the worker on: a loop that never answers is abandoned.
 DEFAULT_DELIVERY_TIMEOUT = 10.0
+
+
+class _DeliveryTimeout(Exception):
+    """Raised by :func:`_await` when the gateway loop never answered in time.
+
+    The scheduled coroutine is cancelled (see ``_await``) before this is
+    raised, so the caller never risks a stale post/edit landing minutes later
+    after the status worker already gave up on it (Q3 / fix requirement 4).
+    """
 
 
 def _default_transport_factory(route: dict[str, Any] | None) -> Any:
@@ -70,6 +80,23 @@ class StatusNotifier:
         self._transports: dict[str, Any] = {}
         self._thread: threading.Thread | None = None
         self._stopped = threading.Event()
+        # Delivery failures named in the log, deduped per (run_key, reason) so
+        # a long-running, repeatedly-failing run does not spam the log on
+        # every tick while still being loud enough to find on the first hit.
+        self._warned: set[tuple[str, str]] = set()
+
+    def _warn_once(self, run_key: str, reason: str, msg: str, *args: Any) -> None:
+        """Log one WARNING per (run_key, reason); every repeat stays silent.
+
+        Fixes the silent fail-open (Q3/Q4): every delivery failure here used
+        to be `logger.debug(..., exc_info=True)`, invisible at the deployed
+        WARNING level. A run's failures must be loud at least once.
+        """
+        key = (run_key, reason)
+        if key in self._warned:
+            return
+        self._warned.add(key)
+        logger.warning(msg, *args)
 
     # ── ingestion ─────────────────────────────────────────────────────
     def handle(self, event: str, payload: dict[str, Any] | None = None) -> None:
@@ -207,8 +234,28 @@ class StatusNotifier:
                 # Unpin regardless of the edit's fate: the run ended successfully,
                 # so the pin should not outlive it even if the final edit was lost.
                 self._unpin(transport, action.run_key, action.message_id, loop)
-        except Exception:  # pragma: no cover - best effort by contract
-            logger.debug("OMO status delivery failed for %s", action.run_key, exc_info=True)
+        except _DeliveryTimeout as exc:
+            # Fix requirement 3: a timeout is the one failure mode that used to
+            # be totally invisible (DEBUG, and the coroutine kept running after
+            # we gave up — see `_await`). It is now cancelled there and loud
+            # here, once per run, at WARNING.
+            self._warn_once(
+                action.run_key,
+                "timeout",
+                "OMO status delivery timed out for %s (%s): %s",
+                action.run_key,
+                action.kind,
+                exc,
+            )
+        except Exception as exc:  # pragma: no cover - best effort by contract
+            self._warn_once(
+                action.run_key,
+                "delivery",
+                "OMO status delivery failed for %s (%s): %s",
+                action.run_key,
+                action.kind,
+                exc,
+            )
 
     def _delete(self, transport: Any, run_key: str, message_id: str | None, loop: Any) -> None:
         """Delete the previous struct after a move; best-effort, never fatal.
@@ -344,7 +391,18 @@ def _await(value: Any, loop: Any = None) -> Any:
         except Exception:
             _close(value)
             raise
-        return future.result(timeout=DEFAULT_DELIVERY_TIMEOUT)
+        try:
+            return future.result(timeout=DEFAULT_DELIVERY_TIMEOUT)
+        except _FutureTimeoutError as exc:
+            # Fix requirement 4: a timed-out delivery must not keep running
+            # unsupervised on the gateway loop — cancel it so a stale post or
+            # edit cannot land minutes later, after the caller already moved
+            # on (Q3). `cancel()` is itself cross-thread safe to call from
+            # here; it is a best-effort request (the coroutine may already be
+            # past a point where cancellation has no effect), but it is always
+            # better than leaving it to run to completion unobserved.
+            loop.call_soon_threadsafe(future.cancel)
+            raise _DeliveryTimeout(str(exc)) from exc
     try:
         asyncio.get_running_loop()
     except RuntimeError:

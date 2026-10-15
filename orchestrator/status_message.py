@@ -335,6 +335,14 @@ def _run_extra(status: str, phase: dict[str, Any], model: str, label: str = "") 
         return _cut(phase.get("duration"), DEFAULT_MAX_CAUSE_CHARS)
     if status in _RUN_CAUSE:
         return _cut(phase.get("cause") or phase.get("detail"), DEFAULT_MAX_CAUSE_CHARS)
+    if status == "pending":
+        # D2: a block that never reached "current" must not render as a static
+        # placeholder forever. `waiting` (when the caller supplies it) is the
+        # elapsed time since the run was created, refreshed on the tracker's
+        # heartbeat, so a stalled worker's row visibly ages instead of sitting
+        # frozen at an eternal hourglass with no information at all.
+        waiting = str(phase.get("waiting") or "").strip()
+        return f"waiting {waiting}" if waiting else ""
     return ""
 
 
@@ -362,6 +370,9 @@ def _row_extra(name: str, status: str, phase: dict[str, Any], model: str, label:
         return _review_extra(status, phase)
     if name == "dispatch" and status in _RUN_CAUSE:
         return _cut(phase.get("cause") or phase.get("detail"), DEFAULT_MAX_CAUSE_CHARS)
+    if name == "dispatch" and status == "pending":
+        waiting = str(phase.get("waiting") or "").strip()
+        return f"waiting {waiting}" if waiting else ""
     return ""
 
 

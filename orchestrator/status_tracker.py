@@ -60,6 +60,24 @@ DEFAULT_MOVE_INTERVAL = 0.0
 # struct and unpin the moment the run ends with every worker succeeded.
 DEFAULT_PIN_MESSAGE = True
 
+# A non-terminal run is re-rendered on this cadence even when no worker event
+# ever arrives (no block has reached "current"). Without this a run whose
+# dispatch/start events never land sits frozen at its initial snapshot for its
+# whole life: tick() would never call `_maybe_emit` for it at all, because the
+# only other tick trigger (`_has_current`) can never become true. The heartbeat
+# fires through the exact same throttle/dedupe path as any other edit — it is
+# just one more reason to re-render, not a bypass of the rules above.
+DEFAULT_HEARTBEAT_INTERVAL = ROTATE_INTERVAL_SECONDS
+
+# First-post retry backoff (seconds): a run with no `message_id` yet is retried
+# on every tick once `post_backoff` has elapsed since the last attempt, with the
+# backoff doubling each miss up to `DEFAULT_POST_RETRY_MAX`. Bounded means the
+# *backoff* is capped, not that retries ever stop while the run stays live — a
+# run that can never reach a working transport must still keep trying, quietly,
+# rather than give up and leave the thread with no status message at all.
+DEFAULT_POST_RETRY_INITIAL = 2.0
+DEFAULT_POST_RETRY_MAX = 30.0
+
 # Run-phase statuses that mean "this worker is finished".
 _SETTLED_RUN = ("done", "failed", "cancelled", "blocked", "interrupted")
 
@@ -156,6 +174,19 @@ class _RunState:
     # carries the release to the next emitted action.
     unpinned: bool = False
     unpin_pending: bool = False
+    # When the state was created (the clock's time, not wall time): the basis
+    # for "how long has this run had no worker reach current" — the exact
+    # question D2's frozen screen needs answered honestly instead of an
+    # eternal pending hourglass.
+    created_at: float | None = None
+    # Heartbeat cadence bookkeeping: ticks independently of `_has_current` so
+    # a run with zero worker events still gets re-rendered periodically.
+    heartbeat_at: float = float("-inf")
+    # First-post retry bookkeeping (D1): while `message_id` is still unset,
+    # `tick()` retries the post on this backoff instead of waiting forever for
+    # the next real event.
+    post_attempt_at: float = float("-inf")
+    post_backoff: float = 0.0
 
 
 class StatusTracker:
@@ -172,11 +203,22 @@ class StatusTracker:
         max_chars: int = DEFAULT_MAX_CHARS,
         activity_provider: Callable[[str, str], str | None] | None = None,
         activity_interval: float | None = None,
+        heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+        post_retry_initial: float = DEFAULT_POST_RETRY_INITIAL,
+        post_retry_max: float = DEFAULT_POST_RETRY_MAX,
     ) -> None:
         self._clock = clock
         self.min_edit_interval = max(0.0, float(min_edit_interval))
         self.phrase_interval = max(0.0, float(phrase_interval))
         self.move_interval = max(0.0, float(move_interval))
+        # D2 fix: a non-terminal run is re-rendered on this cadence even when no
+        # worker event ever arrives, so the screen cannot sit frozen forever.
+        self.heartbeat_interval = max(0.0, float(heartbeat_interval))
+        # D1 fix: a run with no message id yet is retried on this backoff by
+        # tick() instead of waiting for the next real event (which may never
+        # come, or may come only after the route finally resolves).
+        self.post_retry_initial = max(0.0, float(post_retry_initial))
+        self.post_retry_max = max(self.post_retry_initial, float(post_retry_max))
         # Whether to pin the live struct at all. Off means neither the pin nor its
         # matching unpin is ever emitted, so the two can never disagree.
         self.pin_message = bool(pin_message)
@@ -225,7 +267,9 @@ class StatusTracker:
         return action
 
     def tick(self) -> list[Action]:
-        """Advance the rotation clock and flush anything throttled or rotated."""
+        """Advance the rotation clock and flush anything throttled, rotated,
+        stalled-on-first-post (D1), or due for a heartbeat (D2).
+        """
         now = self._clock()
         actions: list[Action] = []
         for state in self._runs.values():
@@ -236,7 +280,26 @@ class StatusTracker:
                 state.phrase_at = now
                 state.phrase_index += 1
                 rotated = True
-            if rotated or state.pending:
+            # D1: the first post never landed (no message_id yet). Retry it on
+            # this tick with a bounded, doubling backoff instead of waiting on
+            # a worker event that may never arrive (or may arrive only after
+            # the route/adapter finally resolves, which could be minutes).
+            due_retry = not state.message_id and (now - state.post_attempt_at) >= state.post_backoff
+            if due_retry:
+                state.post_attempt_at = now
+                state.post_backoff = min(
+                    self.post_retry_max,
+                    state.post_backoff * 2 if state.post_backoff else self.post_retry_initial,
+                )
+            # D2: no worker ever reached "current" (no `_has_current` rotation
+            # trigger exists for it), so without this the screen would never be
+            # re-rendered after its initial snapshot. The render itself reports
+            # a long-stalled pending block honestly (see `_render`'s `waiting`
+            # field), so the text actually changes and clears the dedupe.
+            due_heartbeat = state.message_id and (now - state.heartbeat_at) >= self.heartbeat_interval
+            if due_heartbeat:
+                state.heartbeat_at = now
+            if rotated or state.pending or due_retry or due_heartbeat:
                 action = self._maybe_emit(state, now, force=False)
                 if action is not None:
                     actions.append(action)
@@ -275,7 +338,8 @@ class StatusTracker:
     def _state_for(self, run_key: str) -> _RunState:
         state = self._runs.get(run_key)
         if state is None:
-            state = _RunState(run_key=run_key)
+            now = self._clock()
+            state = _RunState(run_key=run_key, created_at=now, heartbeat_at=now)
             self._runs[run_key] = state
         return state
 
@@ -363,6 +427,11 @@ class StatusTracker:
             phases: list[dict[str, Any]] = []
             for phase in block.phases:
                 rendered: dict[str, Any] = {"name": phase.name, "status": phase.status}
+                # D2: a phase stuck pending (dispatch or run) renders honestly
+                # how long it has been waiting since the run was created,
+                # instead of a static hourglass with no information at all.
+                if phase.status == "pending" and state.created_at is not None:
+                    rendered["waiting"] = _format_duration(state.created_at, now)
                 if phase.name == "run":
                     rendered["run_id"] = phase.run_id
                     rendered["task_id"] = phase.task_id
@@ -423,6 +492,16 @@ class StatusTracker:
             state.last_edit_at = now
             state.last_move_at = now
             state.pending = False
+            # D1: stamp the attempt here too (not only in tick()'s due_retry
+            # branch), so the very first post — emitted straight from apply(),
+            # before tick() ever runs — also starts the backoff clock. Without
+            # this, post_attempt_at stays at its -inf default and the next
+            # tick() sees `now - (-inf) >= 0.0` as always true, firing a
+            # duplicate "post" retry one tick after the first one already went
+            # out (violates "no duplicate messages").
+            state.post_attempt_at = now
+            if not state.post_backoff:
+                state.post_backoff = self.post_retry_initial
             return Action("post", state.run_key, text, pin=self.pin_message)
         if text == state.last_text:
             state.pending = False
