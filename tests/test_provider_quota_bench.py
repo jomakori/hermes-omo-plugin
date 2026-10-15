@@ -131,9 +131,17 @@ def test_a_bounded_bench_never_shortens_a_stated_reset():
 
 def test_a_rate_limit_that_names_its_reset_benches_the_provider():
     # A drained window arriving tagged as a rate limit is still a drained
-    # window: the reset it names is what makes it one.
-    FallbackState(chain=CHAIN).record_failure("claude-haiku-4-5", reason=HOP_REASON_RATE_LIMIT, message=CLAUDE_REFUSAL)
-    assert provider_benched("litellm/claude-sonnet-5")
+    # window: the reset it names is what makes it one. That reset is a clock
+    # time ("resets 10:30am (UTC)"), and reset_at only reads it when it lands
+    # within MAX_BENCH_SECONDS, so the clock is frozen inside that window:
+    # read off the wall clock this passed only between 04:30 and 10:30 UTC.
+    # A bare rate limit is not a drained seat, so there is no bounded bench
+    # to fall back on here - the stated reset is the whole assertion.
+    now = 1_791_961_200.0  # 2026-10-14 07:00:00 UTC, 3.5h before the reset
+    FallbackState(chain=CHAIN).record_failure(
+        "claude-haiku-4-5", reason=HOP_REASON_RATE_LIMIT, message=CLAUDE_REFUSAL, now=now
+    )
+    assert provider_benched("litellm/claude-sonnet-5", now=now)
 
 
 def test_a_bare_rate_limit_benches_only_the_one_model():
