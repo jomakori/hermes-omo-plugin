@@ -297,6 +297,12 @@ class OmoEngine:
         # Declared before the branch, so a rejected graph is still a caller error
         # (`GuardError` from TaskGraph's validation) rather than a silent run_id.
         run = graph.build()
+        # Wake metadata is stamped here rather than inside TaskGraph: only a
+        # background graph needs waking, and only this frame can resolve the
+        # caller's session_key (the walk itself runs off the caller's turn).
+        run.session_key = session.current_session_key()
+        run.background = background
+        self._persist()
         if background:
             self._spawn(self._run_graph(graph, run))
             return {
@@ -325,8 +331,16 @@ class OmoEngine:
         chain = tuple(self._normalize_model(model) or model for model in chain)
         run_id = f"omo_{uuid.uuid4().hex[:8]}"
         # Stamp the run with the session that is paying for it, so a later read or
-        # cancel from another session can be told apart from the owner's.
-        run = Run(run_id=run_id, goal=goal, session_id=session.current_session_id())
+        # cancel from another session can be told apart from the owner's. The
+        # session_key travels too: it is what _wake_caller needs to hand a
+        # background run's result back into this same gateway session later.
+        run = Run(
+            run_id=run_id,
+            goal=goal,
+            session_id=session.current_session_id(),
+            session_key=session.current_session_key(),
+            background=background,
+        )
         worker = Worker(
             run_id=run_id,
             agent_name=name,
@@ -362,7 +376,7 @@ class OmoEngine:
 
         if background:
             worker.status = RUNNING
-            self._spawn(self._run_worker(run, worker, request))
+            self._spawn(self._run_worker_and_wake(run, worker, request))
             return {
                 "run_id": run_id,
                 "status": "running",
@@ -991,11 +1005,64 @@ class OmoEngine:
         await asyncio.to_thread(self._run_sync, run, worker, request)
         self._progress("worker_done", self._worker_event(run, worker))
 
+    async def _run_worker_and_wake(self, run: Run, worker: Worker, request: Any) -> None:
+        # The caller's turn ended when the run_id came back, so this wake is the only
+        # thing that re-opens it. In a `finally`, because a run that died is exactly
+        # the one the caller has to hear about.
+        try:
+            await self._run_worker(run, worker, request)
+        finally:
+            self._wake_caller(run)
+
     async def _run_graph(self, graph: Any, run: Run) -> None:
         # The schedule is a long, blocking walk of a thread pool: keep it off the
         # host's loop, exactly like a single background worker.
-        await asyncio.to_thread(graph.execute, run)
+        try:
+            await asyncio.to_thread(graph.execute, run)
+        finally:
+            self._wake_caller(run)
         self._ctx.emit(f"{self._key()}:graph_done", {"run_id": run.run_id, **graph._payload(run)})
+
+    def _wake_caller(self, run: Run) -> None:
+        """Hand a finished background run back to the conversation that dispatched it.
+
+        A background dispatch answers with its ``run_id`` and the caller's turn ends
+        there, so without this the outcome is only ever seen by a session that thinks
+        to poll for it. One notice per run: ``Run.woken`` is persisted, so a restart
+        that re-adopts the record cannot deliver a second one.
+
+        Best-effort by design — a host with no ``inject_message``, a session that has
+        since gone away, or an injection the host refuses all mean no wake and
+        nothing else. A missed wake is worth an event, never a broken run.
+        """
+        if run.woken or not run.background or not run.session_key:
+            return
+        inject = getattr(self._ctx, "inject_message", None)
+        if not callable(inject):
+            return
+        # Marked before the call: an injector that raises must not be retried by the
+        # next terminal transition this run reports.
+        run.woken = True
+        self._persist()
+        try:
+            delivered = bool(inject(self._wake_text(run), session_key=run.session_key))
+        except Exception:
+            delivered = False
+        if not delivered:
+            self._ctx.emit(f"{self._key()}:wake_failed", {"run_id": run.run_id})
+
+    def _wake_text(self, run: Run) -> str:
+        """The notice a woken session reads: enough to act on without polling."""
+        settled = sum(1 for w in run.workers if w.status in (SUCCEEDED, FAILED, CANCELLED))
+        lines = [f"OMO run {run.run_id} finished — {settled}/{len(run.workers)} worker(s) settled."]
+        for worker in run.workers:
+            spec = AGENTS.get(worker.agent_name)
+            label = worker.title or worker.task.strip().splitlines()[0][:60]
+            lines.append(f"- {spec.display if spec else worker.agent_name} [{worker.status}] {label}")
+            if worker.error:
+                lines.append(f"  error: {worker.error.strip().splitlines()[0][:200]}")
+        lines.append(f"Details: omo action=status run_id={run.run_id}")
+        return "\n".join(lines)
 
     def _key(self) -> str:
         return "omo"
