@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 SESSION_ID_ENV = "HERMES_SESSION_ID"
+SESSION_KEY_ENV = "HERMES_SESSION_KEY"
 ROUTE_PLATFORM_ENV = "HERMES_SESSION_PLATFORM"
 ROUTE_CHAT_ENV = "HERMES_SESSION_CHAT_ID"
 ROUTE_THREAD_ENV = "HERMES_SESSION_THREAD_ID"
@@ -36,6 +37,26 @@ def current_session_id() -> str | None:
         return None
     session_id = str(value).strip()
     return session_id or None
+
+
+def current_session_key() -> str | None:
+    """The calling session's gateway session_key, or `None` when no bridge can answer.
+
+    Mirrors ``current_session_id``: the same optional bridge, the same fail-open
+    behaviour. A run's ``session_key`` is what the host's ``inject_message`` needs
+    to deliver a message back into a *gateway* session later — a worker thread has
+    no session ContextVars, so this has to be captured at dispatch time, the same
+    way ``current_route`` is. A host with no bridge, or one whose import fails,
+    just means this run can never be woken, not that the dispatch fails.
+    """
+    try:
+        from gateway.session_context import get_session_env  # noqa: PLC0415
+
+        value = get_session_env(SESSION_KEY_ENV, "") or ""
+    except Exception:
+        return None
+    session_key = str(value).strip()
+    return session_key or None
 
 
 def current_route() -> dict[str, str] | None:
@@ -98,6 +119,7 @@ __all__ = [
     "ROUTE_PLATFORM_ENV",
     "ROUTE_THREAD_ENV",
     "SESSION_ID_ENV",
+    "SESSION_KEY_ENV",
     "apply_route",
     "belongs_to",
     "current_route",

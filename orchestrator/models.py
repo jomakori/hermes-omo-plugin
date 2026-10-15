@@ -248,6 +248,17 @@ class Run:
     # cancel another's work. `None` on a record written before attribution existed,
     # or by a host with no session bridge — those belong to nobody.
     session_id: str | None = None
+    # The gateway session_key the caller's turn was bound to, captured at dispatch
+    # time for the same reason as session_id: a worker thread has no ContextVars to
+    # resolve it from later. This is what engine._wake_caller passes to
+    # ctx.inject_message so a background run can hand its result back into the
+    # conversation that dispatched it. `None` when no bridge could answer, or the
+    # record predates this field — such a run simply cannot be woken.
+    session_key: str | None = None
+    # Whether this run was dispatched with background=True. Only a background run
+    # is woken on completion: a synchronous dispatch already hands its result back
+    # as the tool call's own return value, so waking it too would double-deliver.
+    background: bool = False
     # Where the run's live status message lands. Captured at dispatch because a
     # worker thread has no session ContextVars to resolve the route from.
     platform: str | None = None
@@ -259,6 +270,9 @@ class Run:
     # The same message's pin. Persisted so an unpin (or the pin-cap eviction)
     # still knows which pin is ours after a restart, and only touches our own.
     status_pinned_id: str | None = None
+    # Whether engine._wake_caller has already fired for this run. Persisted so a
+    # restart that re-adopts an already-woken run from disk never wakes it twice.
+    woken: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -267,11 +281,14 @@ class Run:
             "created_at": self.created_at,
             "recovered": self.recovered,
             "session_id": self.session_id,
+            "session_key": self.session_key,
+            "background": self.background,
             "platform": self.platform,
             "chat_id": self.chat_id,
             "thread_id": self.thread_id,
             "status_message_id": self.status_message_id,
             "status_pinned_id": self.status_pinned_id,
+            "woken": self.woken,
             "workers": [worker.to_dict() for worker in self.workers],
         }
 
@@ -294,11 +311,14 @@ class Run:
             # Absent on a record written before attribution: reads as unattributed
             # rather than as a read error, and stays hidden from a real session.
             session_id=as_optional_str(payload.get("session_id")),
+            session_key=as_optional_str(payload.get("session_key")),
+            background=bool(payload.get("background")),
             platform=as_optional_str(payload.get("platform")),
             chat_id=as_optional_str(payload.get("chat_id")),
             thread_id=as_optional_str(payload.get("thread_id")),
             status_message_id=as_optional_str(payload.get("status_message_id")),
             status_pinned_id=as_optional_str(payload.get("status_pinned_id")),
+            woken=bool(payload.get("woken")),
         )
 
     def tree(self) -> str:
