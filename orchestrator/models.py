@@ -138,6 +138,10 @@ class Worker:
     # Task-graph fields. A plain dispatch leaves them empty.
     task_id: str = ""
     depends_on: tuple[str, ...] = ()
+    # A reconciler (a coordinator that reports on the work) has to run even when
+    # one of the tasks it reports on failed: blocking it hides the failure from
+    # the only task that was asked to name it.
+    runs_on_failure: bool = False
     parent_id: str = ""
     review_cycles: int = 0
     review_verdict: str = ""

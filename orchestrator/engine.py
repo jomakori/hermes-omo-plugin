@@ -96,6 +96,17 @@ _TASK_CONTEXT_OPEN = "<task_context>"
 _TASK_CONTEXT_CLOSE = "\n</task_context>"
 
 
+def _result_field(result: Any, name: str) -> Any:
+    """Read a result field from a mapping or an object.
+
+    The lifecycle returns a dataclass, but hosts and tests hand back plain dicts;
+    ``getattr`` on a dict silently reads "" and would make a real summary look empty.
+    """
+    if isinstance(result, dict):
+        return result.get(name)
+    return getattr(result, name, None)
+
+
 def _clip(text: str, limit: int) -> str:
     """Bound `text` to `limit` characters, naming the cut when one happens."""
     text = (text or "").strip()
@@ -723,6 +734,18 @@ class OmoEngine:
                 result = service.result(handle)
                 worker.result = result
                 if not self._result_failed(result):
+                    silent_error = self._no_output_failure(worker)
+                    if silent_error:
+                        # A clean close that reported nothing is not evidence of
+                        # work: two observed runs returned SUCCEEDED with an empty
+                        # summary while nothing had been built, and the dependent
+                        # tasks then reported on results that did not exist. The
+                        # chain is untouched — this says nothing about the model.
+                        worker.status = FAILED
+                        worker.error = silent_error
+                        worker.finished_at = time.time()
+                        self._progress("worker_failed", self._worker_event(run, worker))
+                        return self._outcome(run, worker)
                     artifact_error = self._artifact_failure(worker)
                     if artifact_error:
                         # The child closed cleanly but produced nothing the brief
@@ -925,6 +948,23 @@ class OmoEngine:
         # failing over"). Read as a success it ends the walk where the outage is and
         # leaves the chain inert, so the hop must advance to its next model instead.
         return provider_exhausted(str(getattr(result, "summary", "") or ""))
+
+    def _no_output_failure(self, worker: Worker) -> str:
+        """The reason a clean-but-empty result is not a success, or "" when it reported.
+
+        The graph hands a dependency's summary to the tasks below it, so an empty
+        summary is not a cosmetic gap: the dependent task has nothing to reconcile
+        and either invents a report or returns nothing itself. Structured payloads
+        count as output — a worker may answer in data instead of prose.
+        """
+        if not bool(self._config("require_worker_summary", True)):
+            return ""
+        result = worker.result
+        if str(_result_field(result, "summary") or "").strip():
+            return ""
+        if _result_field(result, "structured_payload"):
+            return ""
+        return "worker returned no summary and no structured payload; nothing to report or verify"
 
     def _artifact_failure(self, worker: Worker) -> str:
         """The brief's unmet deliverables, or "" when satisfied."""

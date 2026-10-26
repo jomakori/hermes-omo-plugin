@@ -386,8 +386,25 @@ Work with dependencies goes in one call instead of a sequence of dispatches:
 ```
 
 Independent tasks run in parallel, bounded by `max_parallel`; a dependent runs only
-after its dependencies succeed; a dependent of a failed task is reported `BLOCKED`
-and never launched, so a failure cannot silently feed a broken input downstream.
+after its dependencies finish, and it receives their summaries as its context — so the
+task that reports on the work reads what was actually done instead of guessing.
+A dependent of a failed task is reported `BLOCKED` and never launched, so a failure
+cannot silently feed a broken input downstream. The exception is a reconciler: a task
+marked `"runs_on_failure": true` runs even when a dependency failed, because blocking
+it would hide the failure from the only task asked to name it.
+
+```json
+{"action": "dispatch", "goal": "harden the sync path", "tasks": [
+  {"id": "recon",  "agent": "explore",  "prompt": "map how sync works today"},
+  {"id": "fix",    "agent": "debugger", "prompt": "fix the race", "depends_on": ["recon"]},
+  {"id": "report", "agent": "sisyphus", "prompt": "report what shipped and what broke",
+   "depends_on": ["fix"], "runs_on_failure": true}
+]}
+```
+
+A task that closes cleanly without a summary and without a structured payload is
+reported `FAILED` (`require_worker_summary`, on by default): an empty result is not
+evidence of work, and downstream tasks would otherwise reconcile against nothing.
 A declaration is rejected before anything runs if ids repeat, a dependency is
 unknown or points at itself, a cycle exists, or a task carries both `agent` and
 `category` — a rejected graph is rendered as `{"error": ..., "rejected": true}` so

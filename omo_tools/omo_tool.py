@@ -59,7 +59,17 @@ OMO_SCHEMA: dict[str, Any] = {
                         "depends_on": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Ids that must succeed first.",
+                            "description": (
+                                "Ids that must finish first. A task receives the summaries of its "
+                                "dependencies as its context, so a reconciler can report on the work."
+                            ),
+                        },
+                        "runs_on_failure": {
+                            "type": "boolean",
+                            "description": (
+                                "Set on a reconciler task: run even when a dependency failed, so the "
+                                "failure is reported instead of blocking the only task asked to name it."
+                            ),
                         },
                     },
                     "required": ["prompt"],

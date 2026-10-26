@@ -16,7 +16,7 @@ from omo_tools.omo_tool import make_omo_handler
 from orchestrator.chains import ChainResolver
 from orchestrator.engine import OmoEngine
 from orchestrator.guards import GuardError
-from orchestrator.models import BLOCKED, SUCCEEDED
+from orchestrator.models import BLOCKED, FAILED, SUCCEEDED
 from orchestrator.personas import AGENTS_DIR, compose_context
 from roster import AGENTS, ROLE_ALIASES
 
@@ -613,3 +613,72 @@ def test_background_graph_still_rejects_a_bad_declaration():
     assert payload["rejected"] is True
     assert "unknown task" in payload["error"]
     assert engine._ctx.spawned == [], "a rejected graph must not leave a schedule running"
+
+
+# ── oversight: handoff, reconciliation, silent workers ────────────────
+def test_a_dependent_task_receives_its_dependency_results():
+    # The graph used to launch every dependent with context=None, so the one task
+    # asked to reconcile the others had nothing to reconcile and answered NO_DATA.
+    lifecycle = ScriptedLifecycle(
+        results=[FakeResult(summary="built it: PR #1 merged as abc123"), FakeResult(summary="reconciled")]
+    )
+    engine = make_engine(lifecycle)
+    payload = engine.dispatch_graph(
+        tasks=[
+            {"id": "build", "agent": "hephaestus", "prompt": "build it"},
+            {"id": "report", "agent": "sisyphus", "prompt": "report on the build", "depends_on": ["build"]},
+        ],
+        goal="build and report",
+    )
+
+    assert payload["status"] == "succeeded"
+    handoff = lifecycle.launches[1].context or ""
+    assert "## Dependency results" in handoff
+    assert "### build" in handoff
+    assert "PR #1 merged as abc123" in handoff
+    assert SUCCEEDED in handoff
+
+
+def test_a_reconciler_runs_when_a_dependency_failed_and_sees_the_failure():
+    # Blocking the reconciler on the failed task hides the failure from the only
+    # task that was asked to name it.
+    lifecycle = ScriptedLifecycle(fail_goals={"build it"})
+    engine = make_engine(lifecycle)
+    payload = engine.dispatch_graph(
+        tasks=[
+            {"id": "build", "agent": "hephaestus", "prompt": "build it"},
+            {
+                "id": "report",
+                "agent": "sisyphus",
+                "prompt": "report on the build",
+                "depends_on": ["build"],
+                "runs_on_failure": True,
+            },
+        ],
+        goal="build and report",
+    )
+
+    assert lifecycle.goals() == ["build it", "report on the build"]
+    rows = {row["task_id"]: row for row in payload["workers"] if "task_id" in row}
+    assert rows["report"]["status"] == SUCCEEDED
+    handoff = lifecycle.launches[1].context or ""
+    assert "### build" in handoff
+    assert "FAILED" in handoff
+    assert "402 payment required" in handoff
+
+
+def test_a_worker_that_returns_nothing_is_failed_not_succeeded():
+    # Observed in production: four tasks reported SUCCEEDED with an empty summary
+    # and no PR. A silent no-op must not advance the chain or read as done.
+    lifecycle = ScriptedLifecycle(results=[FakeResult(summary="")])
+    engine = make_engine(lifecycle)
+    payload = engine.dispatch_graph(
+        tasks=[{"id": "build", "agent": "hephaestus", "prompt": "build it"}],
+        goal="build it",
+    )
+
+    row = payload["workers"][0]
+    assert row["status"] == FAILED
+    assert payload["status"] == "failed"
+    events = [e for e in engine._ctx.events if e[0] == "worker_failed"]
+    assert events and "no summary" in events[0][1]["error"]
