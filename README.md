@@ -51,6 +51,9 @@ plugins:
         state_path: ~/.omo/runs.json    # where the run registry is persisted
         max_persisted_runs: 50   # runs kept in that record; 0 keeps everything
         max_parallel: 4          # tasks in flight for one graph dispatch
+        worker_timeout_seconds: 1800    # hard bound on one child
+        worker_stall_seconds: 360       # no new message for this long => stop it; 0 disables
+        worker_activity_slice_seconds: 20   # how often the watchdog looks at a child
         max_review_cycles: 1     # reviewer passes per task; 0 disables review
         status_message_enabled: true     # one live status message per run
         status_pin_message: true         # pin that message while the run is live (needs Manage Messages)
@@ -392,6 +395,19 @@ A dependent of a failed task is reported `BLOCKED` and never launched, so a fail
 cannot silently feed a broken input downstream. The exception is a reconciler: a task
 marked `"runs_on_failure": true` runs even when a dependency failed, because blocking
 it would hide the failure from the only task asked to name it.
+
+**A child that stops working is stopped, not waited out.** Every worker used to be
+awaited in one blocking call for the whole `worker_timeout_seconds` (30 minutes by
+default), so a child that hung at minute two still held its slot — and the run — until
+minute thirty. The engine now waits in `worker_activity_slice_seconds` slices and reads
+the child's own message store: while it keeps writing, nothing happens but a
+`worker_heartbeat` progress event (at most one a minute, carrying elapsed and idle
+seconds, so a live message ages visibly). When the newest message is older than
+`worker_stall_seconds` the child is cancelled with the reason and the hop fails with
+`watchdog stopped it: no activity for Ns` — six minutes instead of thirty.
+Stall detection is evidence-only: an unpinned session, an unreadable store, or a host
+that keeps no transcript means no liveness signal, and then the hard timeout is again
+the only bound. A watchdog that guessed would kill slow work.
 
 ```json
 {"action": "dispatch", "goal": "harden the sync path", "tasks": [

@@ -150,6 +150,9 @@ class Worker:
     # names no session, so the profile's newest session at launch is pinned here).
     # The status line reads the worker's live tool call from it.
     activity_session: str | None = None
+    # When the child last wrote a message (epoch seconds), as the watchdog last saw
+    # it. Zero when unknown: no session, no store, or a host that keeps no transcript.
+    last_activity_at: float = 0.0
     # The artifact-verification report for a finished worker (see
     # ``orchestrator.artifact_verify``): whether it claimed a branch/PR/commit at
     # all, and whether each one was actually found. Empty until the worker
@@ -209,6 +212,7 @@ class Worker:
             "review_verdict": self.review_verdict,
             "hop_history": [hop for hop in self.hop_history if isinstance(hop, dict)],
             "activity_session": self.activity_session,
+            "last_activity_at": self.last_activity_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         }
@@ -234,6 +238,7 @@ class Worker:
             review_verdict=str(payload.get("review_verdict") or ""),
             hop_history=[hop for hop in payload.get("hop_history") or () if isinstance(hop, dict)],
             activity_session=as_optional_str(payload.get("activity_session")),
+            last_activity_at=as_float(payload.get("last_activity_at")),
             started_at=as_float(payload.get("started_at")),
             finished_at=None if finished is None else as_float(finished),
         )
