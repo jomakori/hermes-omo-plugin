@@ -18,6 +18,7 @@ from uuid import uuid4
 from orchestrator import session
 from orchestrator.boundary import claim_boundary
 from orchestrator.chains import render_hop_trail
+from orchestrator.engine import _clip, _result_field
 from orchestrator.guards import GuardError
 from orchestrator.models import (
     BLOCKED,
@@ -29,6 +30,11 @@ from orchestrator.models import (
 from roster import AGENTS
 
 REVIEW_AGENT = "momus"
+
+# A dependent task receives its dependencies' results as context. Bounded: the
+# handoff rides next to the worker's persona in the same context window.
+_HANDOFF_PER_DEP_CHARS = 1500
+_HANDOFF_TOTAL_CHARS = 6000
 
 # The reviewer must answer in a shape the scheduler can read; a verdict buried in
 # prose would make the retry decision a guess.
@@ -99,6 +105,9 @@ class TaskGraph:
                     # fragment derived from the raw prompt.
                     "title": str(raw.get("title") or "").strip(),
                     "depends_on": [str(d) for d in deps],
+                    # Declared by a reconciler: report on the work even when a
+                    # dependency failed, instead of being blocked by it.
+                    "runs_on_failure": bool(raw.get("runs_on_failure")),
                     "parent_id": str(raw.get("parent_id") or ""),
                 }
             )
@@ -155,6 +164,7 @@ class TaskGraph:
                 model=chain[0] if chain else None,
                 task_id=task["id"],
                 depends_on=tuple(task["depends_on"]),
+                runs_on_failure=bool(task.get("runs_on_failure")),
                 parent_id=task["parent_id"],
             )
             run.workers.append(worker)
@@ -195,7 +205,7 @@ class TaskGraph:
                 for task_id in [t for t in list(pending) if all(d in settled for d in workers[t].depends_on)]:
                     worker = workers[task_id]
                     pending.discard(task_id)
-                    if any(settled[dep] is False for dep in worker.depends_on):
+                    if any(settled[dep] is False for dep in worker.depends_on) and not worker.runs_on_failure:
                         worker.status = BLOCKED
                         worker.error = "dependency failed"
                         worker.finished_at = time.time()
@@ -270,10 +280,48 @@ class TaskGraph:
     def _run_one(self, run: Run, worker: Worker) -> None:
         engine = self.engine
         spec = AGENTS[worker.agent_name]
-        request = engine._request(goal=worker.task, context=None, spec=spec, model=worker.model, toolsets=None)
+        request = engine._request(
+            goal=worker.task,
+            context=self._dependency_handoff(run, worker),
+            spec=spec,
+            model=worker.model,
+            toolsets=None,
+        )
         engine._run_sync(run, worker, request)
         if self.review and self.max_review_cycles and worker.status == SUCCEEDED:
             self._review_loop(run, worker, request)
+
+    def _dependency_handoff(self, run: Run, worker: Worker) -> str | None:
+        """What this task's dependencies produced, as its context.
+
+        A dependent task used to launch with ``context=None``, so the one task
+        asked to reconcile the others could report only what its own prompt
+        said — never what the work it was reporting on actually did. Observed
+        twice: the coordinator returned ``NO_DATA`` while its siblings held the
+        answers, and the caller had to read the run and reconcile by hand.
+
+        Bounded on purpose: the handoff rides in the child's context window next
+        to its persona, which is clipped against the same budget.
+        """
+        if not worker.depends_on:
+            return None
+        by_id = {w.task_id: w for w in run.workers}
+        blocks: list[str] = []
+        for dep_id in worker.depends_on:
+            dep = by_id.get(dep_id)
+            if dep is None:
+                continue
+            summary = _clip(str(_result_field(dep.result, "summary") or ""), _HANDOFF_PER_DEP_CHARS)
+            headline = dep.title or _clip(" ".join(dep.task.split()), 80) or dep_id
+            lines = [f"### {dep_id} — {headline} · {dep.status}"]
+            lines.append(summary or "(no summary was returned)")
+            if dep.error:
+                lines.append(f"error: {_clip(dep.error, _HANDOFF_PER_DEP_CHARS)}")
+            blocks.append("\n".join(lines))
+        if not blocks:
+            return None
+        text = "## Dependency results\n\n" + "\n\n".join(blocks)
+        return _clip(text, _HANDOFF_TOTAL_CHARS)
 
     # ── review / verification ─────────────────────────────────────────
     def _review_loop(self, run: Run, worker: Worker, request: Any) -> None:
