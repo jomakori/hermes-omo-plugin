@@ -166,6 +166,36 @@ def read_activity(agent: str, session_id: str, profiles_dir: Any = None) -> tupl
     return None
 
 
+def last_message_at(agent: str, session_id: str, profiles_dir: Any = None) -> float | None:
+    """When the session last wrote a message, as an epoch second, or None.
+
+    This is the watchdog's only honest liveness signal: a child that is still
+    working keeps appending rows, and a child that is stuck stops. None means
+    the store could not be read — the caller must then fall back to the hard
+    timeout rather than treating silence as a stall.
+    """
+    session = str(session_id or "").strip()
+    if not session:
+        return None
+    path = _db_path(agent, profiles_dir)
+    if path is None:
+        return None
+    try:
+        with contextlib.closing(_connect(path)) as conn:
+            row = conn.execute(
+                "SELECT MAX(timestamp) FROM messages WHERE session_id = ?",
+                (session,),
+            ).fetchone()
+    except Exception:
+        return None
+    if row is None or row[0] is None:
+        return None
+    try:
+        return float(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def _from_tool_calls(raw: Any) -> tuple[str, str] | None:
     """Parse the newest ``tool_calls`` JSON into ``(tool_name, target)``."""
     try:

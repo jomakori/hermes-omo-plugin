@@ -95,6 +95,14 @@ def artifact_failure(
 _TASK_CONTEXT_OPEN = "<task_context>"
 _TASK_CONTEXT_CLOSE = "\n</task_context>"
 
+# How often a running child is reported as still alive. Not every watchdog slice:
+# a thirty-minute worker would otherwise post ninety status edits to say "nothing yet".
+_HEARTBEAT_INTERVAL_SECONDS = 60.0
+
+
+class WatchdogStop(RuntimeError):
+    """A child the watchdog stopped, so the caller fails the hop instead of waiting."""
+
 
 def _result_field(result: Any, name: str) -> Any:
     """Read a result field from a mapping or an object.
@@ -105,6 +113,19 @@ def _result_field(result: Any, name: str) -> Any:
     if isinstance(result, dict):
         return result.get(name)
     return getattr(result, name, None)
+
+
+def _result_ready(result: Any) -> bool:
+    """Whether ``result`` is a finished child's result rather than a not-ready placeholder.
+
+    The Hermes lifecycle hands back a ``SubagentResult(ready=False)`` while the child
+    still runs, so "there is an object" says nothing. A mapping carries no readiness
+    flag — hosts and tests that return one return the finished result.
+    """
+    ready = _result_field(result, "ready")
+    if ready is None:
+        return True
+    return bool(ready)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -594,14 +615,14 @@ class OmoEngine:
         return render_hop_trail(worker.hop_history)
 
     def _capture_activity_session(self, worker: Worker) -> None:
-        """Pin the child session whose live tool call the status line reads.
+        """Pin the child session the watchdog and the status line read.
 
         The launch handle names no child session (see ``orchestrator.worker_activity``),
-        so the profile's newest session at launch is adopted. Done once, only when a
-        live notifier is attached, and never fatal: no session just means the canned
-        phrase stands.
+        so the profile's newest session at launch is adopted. Done once, and never
+        fatal: no session just means the canned phrase stands and the watchdog has
+        no liveness signal to judge by.
         """
-        if self._status is None or worker.activity_session:
+        if worker.activity_session:
             return
         try:
             from orchestrator import worker_activity  # noqa: PLC0415 - optional
@@ -730,8 +751,12 @@ class OmoEngine:
                     worker.finished_at = time.time()
                     self._progress("worker_cancelled", self._worker_event(run, worker))
                     return self._outcome(run, worker)
-                service.wait(handle, timeout_seconds=self._timeout_seconds())
-                result = service.result(handle)
+                result, stopped = self._await_worker(run, worker, service, handle)
+                if stopped:
+                    # Stop the child before failing the hop: a stalled worker keeps
+                    # spending tokens on the provider side even when nobody reads it.
+                    self._cancel_child(service, handle, stopped)
+                    raise WatchdogStop(stopped)
                 worker.result = result
                 if not self._result_failed(result):
                     silent_error = self._no_output_failure(worker)
@@ -976,8 +1001,95 @@ class OmoEngine:
     def _result_error(self, result: Any) -> str:
         return str(getattr(result, "error_message", "") or getattr(result, "summary", "") or "subagent failed")
 
+    def _await_worker(self, run: Run, worker: Worker, service: Any, handle: Any) -> tuple[Any, str]:
+        """Wait for one launched child in slices, not one long block.
+
+        ``service.wait`` was called once for the whole ``worker_timeout_seconds``,
+        so a child that stopped working held its slot — and the run — until the
+        hard timeout fired half an hour later. Waiting in slices lets the run see
+        the child's own message store go quiet and stop it while the caller still
+        has budget to re-dispatch.
+
+        A stall is only declared on evidence: the pinned session's newest message
+        must have been readable and must have stopped advancing. No signal (no
+        session, unreadable store, a host that keeps no transcript) means no
+        judgement, and the hard timeout stays the only bound.
+
+        Returns ``(result, "")`` when the child finished, or ``(None, reason)``
+        when it was stopped — the caller cancels and fails the hop.
+        """
+        total = self._timeout_seconds()
+        stall = self._stall_seconds()
+        slice_seconds = self._slice_seconds()
+        started = time.time()
+        deadline = started + total
+        # The child cannot be idle for longer than it has existed.
+        last_activity = started
+        last_beat = started
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None, f"worker hit the {int(total)}s timeout"
+            service.wait(handle, timeout_seconds=min(slice_seconds, remaining))
+            result = service.result(handle)
+            if _result_ready(result):
+                return result, ""
+            activity = self._activity_at(worker)
+            if activity is not None:
+                last_activity = max(last_activity, activity)
+                worker.last_activity_at = activity
+            idle = max(0.0, time.time() - last_activity)
+            if stall > 0 and idle >= stall:
+                return None, (f"watchdog stopped it: no activity for {int(idle)}s (worker_stall_seconds={int(stall)})")
+            now = time.time()
+            if now - last_beat >= _HEARTBEAT_INTERVAL_SECONDS:
+                last_beat = now
+                self._beat(run, worker, now - started, idle)
+
+    def _cancel_child(self, service: Any, handle: Any, reason: str) -> None:
+        """Stop a child the watchdog gave up on. Best effort: the failure stands either way."""
+        try:
+            service.cancel(handle, reason=reason)
+        except Exception:
+            pass
+
+    def _activity_at(self, worker: Worker) -> float | None:
+        """The epoch second this child last wrote a message, or None if unknown."""
+        if not worker.activity_session:
+            return None
+        try:
+            from orchestrator import worker_activity  # noqa: PLC0415 - optional
+
+            return worker_activity.last_message_at(
+                worker.agent_name,
+                worker.activity_session,
+                self._config("activity_profiles_dir", None),
+            )
+        except Exception:
+            return None
+
+    def _beat(self, run: Run, worker: Worker, elapsed: float, idle: float) -> None:
+        """Announce a child that is still running, so a stall is visible while it happens."""
+        payload = self._worker_event(run, worker)
+        payload["elapsed_seconds"] = round(elapsed)
+        payload["idle_seconds"] = round(idle)
+        self._progress("worker_heartbeat", payload)
+
     def _timeout_seconds(self) -> float:
         return float(self._config("worker_timeout_seconds", 1800))
+
+    def _stall_seconds(self) -> float:
+        """How long a child may go without writing a message before it is stopped.
+
+        Six minutes: well past the slowest single tool call a worker makes in
+        practice, and short enough that a hung child costs a fraction of the
+        thirty-minute hard timeout it used to burn.
+        """
+        return float(self._config("worker_stall_seconds", 360))
+
+    def _slice_seconds(self) -> float:
+        """How often the watchdog looks at a running child."""
+        return float(self._config("worker_activity_slice_seconds", 20))
 
     def _record_outcome(self, worker: Worker, *, delivered: bool) -> None:
         """Close the shadow pair for a finished worker with what it actually produced.
