@@ -114,12 +114,12 @@ def test_dispatch_exhausts_chain_then_fails():
     assert "rate limit" in out["error"]
 
 
-def test_non_retryable_error_does_not_fall_back():
+def test_context_overflow_hops_to_the_next_rung():
     lifecycle = FakeLifecycle(fail_times=99, error="context_overflow: prompt too long")
     ctx, engine = make_engine(lifecycle)
     out = engine.dispatch(goal="scan", target="explore")
     assert out["status"] == "failed"
-    assert len(lifecycle.launches) == 1
+    assert len(lifecycle.launches) > 1
 
 
 def test_chain_override_is_honoured():
