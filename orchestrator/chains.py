@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 RETRYABLE_STATUS: frozenset[int] = frozenset({400, 401, 403, 404, 408, 425, 429, 500, 502, 503, 504, 529})
-NON_RETRYABLE: frozenset[str] = frozenset({"abort", "context_overflow"})
+NON_RETRYABLE: frozenset[str] = frozenset({"abort"})
 HOP_REASON_TRANSPORT = "transport"
 HOP_REASON_RATE_LIMIT = "rate_limit"
 HOP_REASON_SEMANTIC = "semantic"
@@ -165,9 +165,12 @@ def clear_bench() -> None:
 
 _RETRYABLE_PATTERN = re.compile(
     r"rate.?limit|quota|overloaded|too many requests|temporarily unavailable|"
-    r"service unavailable|bad gateway|gateway timeout",
+    r"service unavailable|bad gateway|gateway timeout|session limit|usage_limited|hit your limit",
     re.IGNORECASE,
 )
+
+# A window too small for the prompt: this rung cannot serve it, a larger one may.
+_OVERFLOW_PATTERN = re.compile(r"context_overflow|prompt too long", re.IGNORECASE)
 
 # A depleted provider answers 402, or wraps the same billing body in 403/404/429.
 _BILLING_PATTERN = re.compile(
@@ -235,7 +238,7 @@ def classify_failure_reason(*, status: int | None = None, error_type: str | None
     if status and status >= 500:
         return HOP_REASON_TRANSPORT
     if _RETRYABLE_PATTERN.search(message or ""):
-        if "rate" in message.lower() or "quota" in message.lower() or "too many" in message.lower():
+        if any(word in message.lower() for word in ("rate", "quota", "too many", "session limit")):
             return HOP_REASON_RATE_LIMIT
         return HOP_REASON_TRANSPORT
     return HOP_REASON_SEMANTIC
@@ -275,6 +278,8 @@ def is_retryable(
 ) -> bool:
     if error_type in NON_RETRYABLE:
         return False
+    if error_type == "context_overflow" or _OVERFLOW_PATTERN.search(message or ""):
+        return True
     codes = retry_on_errors if retry_on_errors is not None else RETRYABLE_STATUS
     if status is not None and status in codes:
         return True

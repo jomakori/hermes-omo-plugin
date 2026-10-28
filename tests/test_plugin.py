@@ -47,7 +47,8 @@ def test_retryable_classification():
     assert is_retryable(message="Rate limit exceeded")
     assert is_retryable(message="provider overloaded")
     assert not is_retryable(error_type="abort")
-    assert not is_retryable(error_type="context_overflow")
+    assert is_retryable(error_type="context_overflow")
+    assert is_retryable(message="You've hit your session limit - resets 10:30am (UTC)")
     assert not is_retryable(status=200, message="fine")
 
 
