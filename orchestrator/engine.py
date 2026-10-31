@@ -1026,6 +1026,7 @@ class OmoEngine:
         # The child cannot be idle for longer than it has existed.
         last_activity = started
         last_beat = started
+        saw_activity = False  # a stall is only real once evidence has been seen at all
         while True:
             remaining = deadline - time.time()
             if remaining <= 0:
@@ -1036,10 +1037,11 @@ class OmoEngine:
                 return result, ""
             activity = self._activity_at(worker)
             if activity is not None:
+                saw_activity = True
                 last_activity = max(last_activity, activity)
                 worker.last_activity_at = activity
             idle = max(0.0, time.time() - last_activity)
-            if stall > 0 and idle >= stall:
+            if saw_activity and stall > 0 and idle >= stall:
                 return None, (f"watchdog stopped it: no activity for {int(idle)}s (worker_stall_seconds={int(stall)})")
             now = time.time()
             if now - last_beat >= _HEARTBEAT_INTERVAL_SECONDS:
