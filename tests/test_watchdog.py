@@ -168,6 +168,47 @@ def test_the_hard_timeout_still_ends_a_child_that_never_finishes():
     assert lifecycle.cancelled and "timeout" in lifecycle.cancelled[0]
 
 
+def test_no_evidence_at_all_is_not_stalled_at_the_stall_bound_but_hits_hard_timeout():
+    """With worker_stall_seconds=360 but zero liveness signal, 360s must not fire
+    the stall path — only the (much shorter, here) hard timeout may end the child."""
+    lifecycle = SlowLifecycle(slices=10_000)
+    ctx, engine = make_engine(
+        lifecycle,
+        {"worker_timeout_seconds": 0.05, "worker_stall_seconds": 360},
+    )
+    engine._activity_at = lambda worker: None
+
+    started = time.time()
+    out = engine.dispatch(goal="scan the repo", target="explore")
+    elapsed = time.time() - started
+
+    assert out["status"] == "failed"
+    assert "timeout" in out["error"]
+    assert "no activity" not in out["error"], "no evidence means no stall verdict, ever"
+    assert lifecycle.cancelled and "timeout" in lifecycle.cancelled[0]
+    assert elapsed < 10, "stopped by the hard timeout, not by waiting out 360s"
+
+
+def test_evidence_that_goes_idle_past_the_stall_bound_is_stopped():
+    """Once liveness evidence exists and then stops advancing, the stall fires
+    well before the hard timeout."""
+    lifecycle = SlowLifecycle(slices=10_000)
+    ctx, engine = make_engine(lifecycle, {"worker_stall_seconds": 0.05, "worker_timeout_seconds": 5})
+    # A pinned session whose newest message is far in the past: evidence exists,
+    # but it is stale, so idle time immediately exceeds the stall bound.
+    engine._activity_at = lambda worker: time.time() - 600
+
+    started = time.time()
+    out = engine.dispatch(goal="scan the repo", target="explore")
+    elapsed = time.time() - started
+
+    assert out["status"] == "failed"
+    assert "no activity" in out["error"]
+    assert "watchdog" in out["error"]
+    assert lifecycle.cancelled and "no activity" in lifecycle.cancelled[0]
+    assert elapsed < 1, "the watchdog stopped it long before the 5s hard timeout"
+
+
 def test_the_activity_reader_speaks_the_real_store(tmp_path):
     """The watchdog reads the host's own sqlite, not a shape invented in a test."""
     import sqlite3
