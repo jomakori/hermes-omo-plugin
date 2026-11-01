@@ -25,7 +25,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from omo_tools.omo_tool import make_omo_handler  # noqa: E402
 from orchestrator.chains import ChainResolver  # noqa: E402
 from orchestrator.engine import OmoEngine  # noqa: E402
-from orchestrator.models import FAILED, SUCCEEDED, UNVERIFIED_CLAIM_PREFIX, Worker  # noqa: E402
+from orchestrator.models import FAILED, SUCCEEDED, UNVERIFIED_CLAIM_PREFIX, Worker, completion_label  # noqa: E402
 
 
 @dataclasses.dataclass
@@ -192,3 +192,33 @@ def test_a_running_run_has_no_result_yet():
     assert "result" not in row or row["result"] is None
     for coro in ctx.spawned:
         coro.close()
+
+
+def test_succeeded_worker_reads_reported_done_by_default():
+    """No review, no artifact check: the row says what the worker said, not what anyone saw."""
+    worker = Worker(run_id="r1", agent_name="librarian", task="t", chain=())
+    worker.status = SUCCEEDED
+    worker.result = FakeResult(summary="did the work")
+
+    row = worker.as_row()
+
+    assert row["completion"] == "reported done"
+    # Additive: the verdict itself is untouched.
+    assert row["status"] == SUCCEEDED
+
+
+def test_succeeded_worker_reads_verified_after_a_passing_review():
+    """The host's own observation - a passing review verdict - earns 'verified'."""
+    worker = Worker(run_id="r1", agent_name="librarian", task="t", chain=())
+    worker.status = SUCCEEDED
+    worker.review_verdict = "pass"
+    worker.result = FakeResult(summary="did the work")
+
+    row = worker.as_row()
+
+    assert row["completion"] == "verified"
+    assert row["status"] == SUCCEEDED
+
+
+def test_completion_label_is_none_before_the_worker_finishes():
+    assert completion_label("RUNNING", "", {}) is None
