@@ -99,6 +99,34 @@ def result_payload(result: Any, status: str | None = None) -> Any:
     return fields or {"value": str(result)}
 
 
+# A SUCCEEDED worker's own narration reads as a claim until the host itself
+# watched a pass happen - a reviewer's "pass" verdict, or an artifact check the
+# host ran and confirmed. Absent either, the row says only what the worker
+# said about itself, not what anyone saw.
+COMPLETION_REPORTED_DONE = "reported done"
+COMPLETION_VERIFIED = "verified"
+
+
+def completion_label(status: str, review_verdict: str, verification: dict[str, Any] | None) -> str | None:
+    """'verified' vs 'reported done' for a finished worker; ``None`` pre-completion.
+
+    Only a SUCCEEDED worker gets a label at all - failure and cancellation
+    already read as unproven, so there is nothing here to distinguish. Within
+    SUCCEEDED, 'verified' requires the host's own observation (see
+    ``orchestrator.boundary``): a passing review verdict, or an artifact check
+    the host ran and confirmed. Everything else - including a SUCCEEDED worker
+    with no review and no artifact check - is 'reported done': the worker's
+    own word, not yet checked against anything the host saw.
+    """
+    if status != SUCCEEDED:
+        return None
+    if review_verdict == "pass":
+        return COMPLETION_VERIFIED
+    if verification and verification.get("verifiable") and verification.get("verified"):
+        return COMPLETION_VERIFIED
+    return COMPLETION_REPORTED_DONE
+
+
 def unverified_marker(verification: dict[str, Any] | None) -> dict[str, Any]:
     """The explicit marker a result carries when a claimed artifact failed to verify.
 
@@ -183,6 +211,11 @@ class Worker:
                 # success: the marker travels with the result the caller reads.
                 payload = {**payload, **marker}
             row["result"] = payload
+        # Additive alongside `status`: never replaces it, only says whether the
+        # host itself watched the SUCCEEDED claim pass.
+        label = completion_label(self.status, self.review_verdict, self.verification)
+        if label:
+            row["completion"] = label
         if self.depends_on:
             row["depends_on"] = list(self.depends_on)
         if self.parent_id:
