@@ -196,6 +196,8 @@ class Worker:
             "model": self.model,
             "run_id": self.run_id,
         }
+        if self.error:
+            row["error"] = self.error
         if self.title:
             row["title"] = self.title
         if self.task_id:
