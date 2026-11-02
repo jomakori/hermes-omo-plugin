@@ -262,6 +262,58 @@ def test_graph_rejects_invalid_declarations(tasks, message):
         engine.dispatch_graph(tasks=tasks)
 
 
+# ── write_paths overlap ─────────────────────────────────────────────────
+def test_graph_accepts_concurrent_tasks_with_disjoint_write_paths():
+    lifecycle = ScriptedLifecycle()
+    engine = make_engine(lifecycle)
+    payload = engine.dispatch_graph(
+        tasks=[
+            {"id": "a", "agent": "explore", "prompt": "task a", "write_paths": ["src/a/*"]},
+            {"id": "b", "agent": "librarian", "prompt": "task b", "write_paths": ["src/b/*"]},
+        ]
+    )
+    assert payload["status"] == "succeeded"
+
+
+def test_graph_rejects_concurrent_tasks_with_overlapping_write_paths():
+    engine = make_engine(ScriptedLifecycle())
+    with pytest.raises(GuardError, match="overlapping write_paths"):
+        engine.dispatch_graph(
+            tasks=[
+                {"id": "a", "agent": "explore", "prompt": "task a", "write_paths": ["src/shared/*"]},
+                {"id": "b", "agent": "librarian", "prompt": "task b", "write_paths": ["src/shared/*"]},
+            ]
+        )
+
+
+def test_graph_allows_overlapping_write_paths_when_ordered_by_a_dependency():
+    # b depends on a, so they never run concurrently: the overlap is irrelevant.
+    lifecycle = ScriptedLifecycle()
+    engine = make_engine(lifecycle)
+    payload = engine.dispatch_graph(
+        tasks=[
+            {"id": "a", "agent": "explore", "prompt": "task a", "write_paths": ["src/shared/*"]},
+            {"id": "b", "agent": "librarian", "prompt": "task b", "depends_on": ["a"], "write_paths": ["src/shared/*"]},
+        ]
+    )
+    assert payload["status"] == "succeeded"
+
+
+def test_graph_without_write_paths_keeps_current_behaviour():
+    # No task declares write_paths: the overlap check must be a no-op.
+    lifecycle = ScriptedLifecycle(delay=0.05)
+    engine = make_engine(lifecycle)
+    payload = engine.dispatch_graph(
+        tasks=[
+            {"id": "a", "agent": "explore", "prompt": "task a"},
+            {"id": "b", "agent": "librarian", "prompt": "task b"},
+        ],
+        max_parallel=2,
+    )
+    assert payload["status"] == "succeeded"
+    assert lifecycle.peak == 2, "independent tasks should still overlap"
+
+
 # ── review / verification cycles ──────────────────────────────────────
 def test_review_problems_rerun_the_task_with_notes():
     lifecycle = ScriptedLifecycle(

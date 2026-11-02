@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextvars
 import dataclasses
+import fnmatch
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -109,6 +110,10 @@ class TaskGraph:
                     # dependency failed, instead of being blocked by it.
                     "runs_on_failure": bool(raw.get("runs_on_failure")),
                     "parent_id": str(raw.get("parent_id") or ""),
+                    # Optional, caller-declared: globs this task writes to. Lets the
+                    # graph catch two concurrent tasks about to clobber each other's
+                    # output before either one launches.
+                    "write_paths": [str(p) for p in (raw.get("write_paths") or [])],
                 }
             )
         return normalized
@@ -132,6 +137,46 @@ class TaskGraph:
                 raise GuardError("task graph has a cycle: " + ", ".join(sorted(remaining)))
             for tid in ready:
                 remaining.pop(tid)
+        self._check_write_path_overlap()
+
+    def _check_write_path_overlap(self) -> None:
+        """Two tasks that may run concurrently must not declare overlapping write_paths.
+
+        "Concurrent" means neither is a transitive dependency of the other —
+        the same ordering the scheduler itself uses to decide what may overlap.
+        Tasks without write_paths are untouched by this check (current behaviour).
+        """
+        deps_by_id = {t["id"]: set(t["depends_on"]) for t in self.tasks}
+        ancestor_cache: dict[str, set[str]] = {}
+
+        def ancestors_of(tid: str) -> set[str]:
+            if tid in ancestor_cache:
+                return ancestor_cache[tid]
+            seen: set[str] = set()
+            stack = list(deps_by_id[tid])
+            while stack:
+                dep = stack.pop()
+                if dep in seen:
+                    continue
+                seen.add(dep)
+                stack.extend(deps_by_id[dep])
+            ancestor_cache[tid] = seen
+            return seen
+
+        writers = [t for t in self.tasks if t["write_paths"]]
+        for i, a in enumerate(writers):
+            for b in writers[i + 1 :]:
+                if b["id"] in ancestors_of(a["id"]) or a["id"] in ancestors_of(b["id"]):
+                    continue  # ordered by a dependency path: never runs concurrently
+                # Overlap means a glob match either way: literal prefix or exact equality.
+                if any(
+                    fnmatch.fnmatch(pa, pb) or fnmatch.fnmatch(pb, pa)
+                    for pa in a["write_paths"]
+                    for pb in b["write_paths"]
+                ):
+                    raise GuardError(
+                        f"tasks {a['id']} and {b['id']} run concurrently and have overlapping write_paths."
+                    )
 
     # ── scheduling ────────────────────────────────────────────────────
     def run(self) -> dict[str, Any]:
