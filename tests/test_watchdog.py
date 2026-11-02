@@ -254,9 +254,14 @@ def test_open_tool_call_is_alive_until_its_result_lands(tmp_path):
     profile = tmp_path / "hephaestus"
     profile.mkdir()
     conn = sqlite3.connect(profile / "state.db")
-    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, tool_calls TEXT, timestamp REAL)")
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, tool_calls TEXT, timestamp REAL)"
+    )
     calls = json.dumps([{"function": {"name": "terminal", "arguments": {"command": "gh pr checks"}}}])
-    conn.execute("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES ('s', 'assistant', ?, 1000.0)", (calls,))
+    conn.execute(
+        "INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES ('s', 'assistant', ?, 1000.0)",
+        (calls,),
+    )
     conn.commit()
     assert worker_activity.open_tool_call_at("hephaestus", "s", tmp_path) == 1000.0
     conn.execute("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES ('s', 'tool', NULL, 1100.0)")
