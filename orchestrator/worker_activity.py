@@ -34,6 +34,9 @@ from typing import Any
 
 from orchestrator.status_message import render_activity
 
+# A tool call still awaiting its result is alive for this long after it began.
+TOOL_CALL_OPEN_TTL_SECONDS = 900.0
+
 __all__ = [
     "make_activity_provider",
     "profiles_root",
@@ -192,6 +195,33 @@ def last_message_at(agent: str, session_id: str, profiles_dir: Any = None) -> fl
         return None
     try:
         return float(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def open_tool_call_at(agent: str, session_id: str, profiles_dir: Any = None) -> float | None:
+    """When the session's newest message is a tool call still awaiting its result, else None.
+
+    A call writes its assistant row when issued and nothing until it returns, so
+    a long CI or test wait is silent in ``messages`` while it is in flight.
+    """
+    session = str(session_id or "").strip()
+    path = _db_path(agent, profiles_dir) if session else None
+    if path is None:
+        return None
+    try:
+        with contextlib.closing(_connect(path)) as conn:
+            row = conn.execute(
+                "SELECT role, tool_calls, timestamp FROM messages WHERE session_id = ? "
+                "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+                (session,),
+            ).fetchone()
+    except Exception:
+        return None
+    if row is None or row[0] != "assistant" or not row[1] or row[2] is None:
+        return None
+    try:
+        return float(row[2])
     except (TypeError, ValueError):
         return None
 

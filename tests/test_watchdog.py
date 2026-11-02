@@ -242,3 +242,47 @@ def test_a_stalled_child_is_failed_rather_than_cancelled():
 
     assert out["status"] == "failed"
     assert out["status"] != "cancelled"
+
+
+def test_open_tool_call_is_alive_until_its_result_lands(tmp_path):
+    """An assistant row with tool_calls and no result yet is in flight, not silent."""
+    import json
+    import sqlite3
+
+    from orchestrator import worker_activity
+
+    profile = tmp_path / "hephaestus"
+    profile.mkdir()
+    conn = sqlite3.connect(profile / "state.db")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, tool_calls TEXT, timestamp REAL)")
+    calls = json.dumps([{"function": {"name": "terminal", "arguments": {"command": "gh pr checks"}}}])
+    conn.execute("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES ('s', 'assistant', ?, 1000.0)", (calls,))
+    conn.commit()
+    assert worker_activity.open_tool_call_at("hephaestus", "s", tmp_path) == 1000.0
+    conn.execute("INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES ('s', 'tool', NULL, 1100.0)")
+    conn.commit()
+    conn.close()
+    assert worker_activity.open_tool_call_at("hephaestus", "s", tmp_path) is None
+    assert worker_activity.open_tool_call_at("hephaestus", "missing", tmp_path) is None
+
+
+def test_a_stalled_child_gets_one_resume_before_the_hop_fails():
+    lifecycle = SlowLifecycle(slices=10_000)
+    ctx, engine = make_engine(lifecycle, {"worker_stall_seconds": 0.05, "worker_timeout_seconds": 5})
+    engine._activity_at = lambda worker: time.time() - 600
+
+    out = engine.dispatch(goal="scan the repo", target="explore")
+
+    assert out["status"] == "failed"
+    assert "no activity" in out["error"]
+    assert len(lifecycle.launches) == 2, "one resume, then the stall fails the hop"
+
+
+def test_the_resume_brief_names_branch_sha_and_status():
+    lifecycle = SlowLifecycle()
+    _, engine = make_engine(lifecycle)
+    spec = type("S", (), {"orchestrator": False, "name": "x"})()
+    req = request_factory(goal="fix x", context=None, spec=spec, model="m", toolsets=None)
+    resumed = engine._resume_request(req)
+    assert resumed.goal.startswith("fix x")
+    assert "RESUME" in resumed.goal and "git status" in resumed.goal and "HEAD SHA" in resumed.goal

@@ -723,6 +723,7 @@ class OmoEngine:
         state = self.chains.state_for(worker.agent_name, worker.chain)
         last_error = ""
         last_reason = ""
+        stall_retried = False
         if self._attempts_exhausted(worker):
             # This stage has already been paid for `max_attempts_per_agent` times and
             # failed every time: another walk would start at the primary and, on a
@@ -789,6 +790,14 @@ class OmoEngine:
                     self._progress("worker_succeeded", self._worker_event(run, worker))
                     return self._outcome(run, worker)
                 error = self._result_error(result)
+            except WatchdogStop as exc:
+                error = str(exc)
+                if not stall_retried and not worker.cancel_requested:
+                    # One resume on the same model before the hop fails: the brief says
+                    # where the child stopped, so the retry does not start from zero.
+                    stall_retried = True
+                    request = self._resume_request(request)
+                    continue
             except Exception as exc:
                 error = str(exc)
 
@@ -956,6 +965,17 @@ class OmoEngine:
             return model[len("litellm/") :]
         return model
 
+    def _resume_request(self, request: Any) -> Any:
+        """Re-issue a stalled child's brief with a resume note instead of starting over."""
+        import dataclasses  # noqa: PLC0415
+
+        note = (
+            "\n\nRESUME: your previous attempt was stopped for no activity. Check your worktree "
+            "(git status, git rev-parse HEAD), keep work already done, do not restart. Your final "
+            "summary must name the branch, the HEAD SHA and what changed."
+        )
+        return dataclasses.replace(request, goal=f"{request.goal}{note}")
+
     def _with_model(self, request: Any, model: str) -> Any:
         import dataclasses  # noqa: PLC0415
 
@@ -1056,17 +1076,24 @@ class OmoEngine:
             pass
 
     def _activity_at(self, worker: Worker) -> float | None:
-        """The epoch second this child last wrote a message, or None if unknown."""
+        """The epoch second this child last showed life, or None if unknown.
+
+        A tool call still awaiting its result writes nothing until it returns, so
+        it counts as alive for TOOL_CALL_OPEN_TTL_SECONDS from when it was issued.
+        Open longer than that, it is silence and the watchdog may stop it.
+        """
         if not worker.activity_session:
             return None
         try:
             from orchestrator import worker_activity  # noqa: PLC0415 - optional
 
-            return worker_activity.last_message_at(
-                worker.agent_name,
-                worker.activity_session,
-                self._config("activity_profiles_dir", None),
-            )
+            profiles = self._config("activity_profiles_dir", None)
+            last = worker_activity.last_message_at(worker.agent_name, worker.activity_session, profiles)
+            opened = worker_activity.open_tool_call_at(worker.agent_name, worker.activity_session, profiles)
+            if opened is not None:
+                alive_until = opened + worker_activity.TOOL_CALL_OPEN_TTL_SECONDS
+                last = alive_until if last is None else max(last, alive_until)
+            return last
         except Exception:
             return None
 
