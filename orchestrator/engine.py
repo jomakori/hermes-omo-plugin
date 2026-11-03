@@ -628,7 +628,10 @@ class OmoEngine:
             from orchestrator import worker_activity  # noqa: PLC0415 - optional
 
             worker.activity_session = (
-                worker_activity.session_at_launch(worker.agent_name, self._config("activity_profiles_dir", None)) or ""
+                worker_activity.session_at_launch(
+                    worker.agent_name, self._config("activity_profiles_dir", None), since=worker.started_at
+                )
+                or ""
             )
         except Exception:
             worker.activity_session = ""
@@ -1082,6 +1085,8 @@ class OmoEngine:
         it counts as alive for TOOL_CALL_OPEN_TTL_SECONDS from when it was issued.
         Open longer than that, it is silence and the watchdog may stop it.
         """
+        # The child's session row may not exist yet at launch; retry the binding each slice.
+        self._capture_activity_session(worker)
         if not worker.activity_session:
             return None
         try:

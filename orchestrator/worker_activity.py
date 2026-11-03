@@ -107,7 +107,7 @@ def _connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def session_at_launch(agent: str, profiles_dir: Any = None) -> str | None:
+def session_at_launch(agent: str, profiles_dir: Any = None, since: float = 0.0) -> str | None:
     """The agent profile's newest session id, or None when it cannot be read.
 
     The spike (module docstring) proved the launch handle names no child session,
@@ -119,13 +119,20 @@ def session_at_launch(agent: str, profiles_dir: Any = None) -> str | None:
     try:
         with contextlib.closing(_connect(path)) as conn:
             # ``sessions`` keys the session id as its primary column ``id``.
+            # Only sessions started at or after ``since`` belong to this worker; an
+            # older session is the profile's previous work, not a binding.
             row = conn.execute(
-                "SELECT id FROM sessions WHERE id IS NOT NULL AND id != '' ORDER BY started_at DESC LIMIT 1"
+                "SELECT id FROM sessions WHERE id IS NOT NULL AND id != '' AND started_at >= ? "
+                "ORDER BY started_at DESC LIMIT 1",
+                (since,),
             ).fetchone()
             if row and row[0]:
                 return str(row[0])
             # A profile with no ``sessions`` row (older store) still has messages.
-            row = conn.execute("SELECT session_id FROM messages ORDER BY timestamp DESC LIMIT 1").fetchone()
+            row = conn.execute(
+                "SELECT session_id FROM messages WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT 1",
+                (since,),
+            ).fetchone()
             return str(row[0]) if row and row[0] else None
     except Exception:
         return None
