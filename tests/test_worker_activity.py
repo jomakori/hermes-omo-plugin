@@ -85,3 +85,9 @@ def test_make_provider_reads_the_db_and_formats_the_line(tmp_path):
     assert provider("s1", "hephaestus") == "\U0001f527 patch a/b.py"
     # Nothing observable yet -> None, so the tracker keeps the canned phrase.
     assert provider("missing-session", "hephaestus") is None
+
+
+def test_session_at_launch_ignores_sessions_older_than_the_launch(tmp_path):
+    root = _profile(tmp_path, sessions=[("old", 1.0)], messages=[("old", None, None, 1.0)])
+    assert session_at_launch("hephaestus", root, since=2.0) is None
+    assert session_at_launch("hephaestus", root, since=0.5) == "old"
