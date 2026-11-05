@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from orchestrator.artifact_verify import COULD_NOT_CHECK
 from roster import agent
 
 PENDING = "PENDING"
@@ -21,6 +22,10 @@ BLOCKED = "BLOCKED"
 RETRYING = "RETRYING"
 # A worker whose process is gone: recorded from disk after a restart, never live.
 INTERRUPTED = "INTERRUPTED"
+# A SUCCEEDED claim the host's own verification pass attempted and found zero
+# artifacts backing (see ``unauthenticated_terminal_state``): the process exited
+# cleanly, but nothing the worker named was actually there.
+UNAUTHENTICATED = "UNAUTHENTICATED"
 
 # Statuses that only a live process can hold; anything else is a finished record.
 UNFINISHED = (PENDING, RUNNING, RETRYING)
@@ -125,6 +130,33 @@ def completion_label(status: str, review_verdict: str, verification: dict[str, A
     if verification and verification.get("verifiable") and verification.get("verified"):
         return COMPLETION_VERIFIED
     return COMPLETION_REPORTED_DONE
+
+
+def demote_unauthenticated(status: str, verification: dict[str, Any] | None) -> str:
+    """A SUCCEEDED claim the host's own check backed with nothing reads as UNAUTHENTICATED.
+
+    Reuses the same ``verification`` block ``completion_label``/``unverified_marker``
+    already read (see ``orchestrator.artifact_verify``) rather than inventing a new
+    evidence rule. Strictly narrower than "no artifacts were checked": this only
+    fires when a check was actually attempted (``verifiable``) and every claimed
+    artifact was positively confirmed absent. A run where verification was never
+    attempted at all (``verification`` empty, or ``verifiable`` False - no claim,
+    or the gate was off) is a different, unrelated case and must keep reading
+    SUCCEEDED - an absence of evidence that was never sought is not evidence
+    against the claim. A verdict the verifier itself could not reach (it raised;
+    see ``artifact_verify.COULD_NOT_CHECK``) is the same kind of non-evidence, not
+    a confirmed absence, so it is excluded here too - demoting on a crashed `gh`
+    call would punish the worker for the host's own tooling failing. Anything
+    that was never SUCCEEDED passes through untouched: this only ever reads a
+    SUCCEEDED claim down, never any other terminal status.
+    """
+    if status != SUCCEEDED or not verification or not verification.get("verifiable"):
+        return status
+    artifacts = verification.get("artifacts") or []
+    checked = [a for a in artifacts if isinstance(a, dict) and COULD_NOT_CHECK not in str(a.get("detail") or "")]
+    if not checked or any(a.get("exists") for a in checked):
+        return status
+    return UNAUTHENTICATED
 
 
 def unverified_marker(verification: dict[str, Any] | None) -> dict[str, Any]:

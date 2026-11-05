@@ -28,7 +28,7 @@ from orchestrator.artifact_verify import (  # noqa: E402
 )
 from orchestrator.chains import HOP_REASON_UNVERIFIABLE, ChainResolver  # noqa: E402
 from orchestrator.engine import OmoEngine  # noqa: E402
-from orchestrator.models import SUCCEEDED  # noqa: E402
+from orchestrator.models import SUCCEEDED, UNAUTHENTICATED  # noqa: E402
 
 
 class FakeVerifier:
@@ -291,9 +291,10 @@ def test_a_succeeded_worker_claiming_a_missing_branch_is_marked_unverified():
     run_id = out["run_id"]
     row = engine.status(run_id)["workers"][0]
 
-    # The host still saw a clean exit, so the status is not rewritten; what
-    # changes is that the result no longer reads as a plain SUCCEEDED.
-    assert row["status"] == SUCCEEDED
+    # The host's own check ran and backed none of the claimed artifacts, so the
+    # terminal state itself is demoted (see demote_unauthenticated): a plain
+    # SUCCEEDED would read as the host having watched this pass, which it did not.
+    assert row["status"] == UNAUTHENTICATED
     assert row["result"]["verified"] is False
     assert row["result"]["verification"]["reason"] == HOP_REASON_UNVERIFIABLE
     assert "feat/ghost-branch" in row["result"]["verification"]["detail"]

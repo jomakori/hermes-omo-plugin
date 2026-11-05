@@ -33,6 +33,7 @@ from orchestrator.models import (
     UNFINISHED,
     Run,
     Worker,
+    demote_unauthenticated,
 )
 from orchestrator.personas import MAX_CONTEXT_CHARS, compose_context
 from orchestrator.self_patch import SELF_PATCH_ORIGIN, build_self_patch_task
@@ -1212,6 +1213,9 @@ class OmoEngine:
         # Check the claim before the record is written, so the stored row and the
         # returned payload agree about whether anyone confirmed the work.
         self._verify_claimed_artifacts(worker)
+        # A SUCCEEDED claim the check just ran and backed with nothing demotes here,
+        # before anything downstream reads worker.status as the terminal verdict.
+        worker.status = demote_unauthenticated(worker.status, worker.verification)
         self._record_outcome(worker, delivered=worker.status == SUCCEEDED)
         self._persist()
         # Additive side effect only: does not change what this payload reports
