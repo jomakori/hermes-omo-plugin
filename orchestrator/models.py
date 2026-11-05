@@ -186,6 +186,10 @@ class Worker:
     # all, and whether each one was actually found. Empty until the worker
     # finishes, and left empty for a worker that claimed nothing.
     verification: dict[str, Any] = field(default_factory=dict)
+    # The bounded, redacted summary of why a FAILED/CANCELLED/INTERRUPTED hop
+    # ended (see orchestrator.crash_reason.crash_reason_for). Empty for a
+    # worker that never reached a terminal failure state.
+    crash_reason: dict[str, Any] = field(default_factory=dict)
 
     def as_row(self) -> dict[str, Any]:
         spec = agent(self.agent_name)
@@ -228,6 +232,8 @@ class Worker:
             row["review_verdict"] = self.review_verdict
         if self.hop_history:
             row["hop_history"] = self.hop_history
+        if self.crash_reason:
+            row["crash_reason"] = dict(self.crash_reason)
         return row
 
     def to_dict(self) -> dict[str, Any]:
@@ -246,6 +252,7 @@ class Worker:
             "review_cycles": self.review_cycles,
             "review_verdict": self.review_verdict,
             "hop_history": [hop for hop in self.hop_history if isinstance(hop, dict)],
+            "crash_reason": dict(self.crash_reason) if isinstance(self.crash_reason, dict) else {},
             "activity_session": self.activity_session,
             "last_activity_at": self.last_activity_at,
             "started_at": self.started_at,
@@ -272,6 +279,7 @@ class Worker:
             review_cycles=as_int(payload.get("review_cycles"), 0),
             review_verdict=str(payload.get("review_verdict") or ""),
             hop_history=[hop for hop in payload.get("hop_history") or () if isinstance(hop, dict)],
+            crash_reason=dict(payload["crash_reason"]) if isinstance(payload.get("crash_reason"), dict) else {},
             activity_session=as_optional_str(payload.get("activity_session")),
             last_activity_at=as_float(payload.get("last_activity_at")),
             started_at=as_float(payload.get("started_at")),
