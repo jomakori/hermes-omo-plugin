@@ -236,6 +236,77 @@ def test_noul_margin_strength_far_above_threshold():
     assert decisions["secrets_involved"]["strength"] == "strong"
 
 
+def test_threshold_override_per_call_flips_confident():
+    """Per-call threshold_overrides wins over the 0.9 default for 'destructive'."""
+    response = {
+        "model": "jev-latest",
+        "answers": {
+            "irreversible": {"noul": 0.0},
+            "external_side_effect": {"noul": 0.0},
+            "destructive": {"noul": 0.6},
+            "secrets_involved": {"noul": 0.0},
+        },
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+    handler, key = _make_handler()
+    with _mock_urlopen(response):
+        with mock.patch.dict(os.environ, {"TYPESAFE_AI_API_KEY": key}):
+            result = asyncio.run(
+                handler(
+                    {
+                        "pack": "gate_risk",
+                        "state": {"action_text": "x", "threshold_overrides": {"destructive": 0.5}},
+                    }
+                )
+            )
+    envelope = json.loads(result)
+    assert envelope["decisions"]["destructive"]["confident"] is True
+    assert envelope["decisions"]["destructive"]["threshold"] == 0.5
+
+
+def test_threshold_override_invalid_value_ignored():
+    """An out-of-range/non-numeric override is dropped; the default threshold still applies."""
+    response = {
+        "model": "jev-latest",
+        "answers": {
+            "irreversible": {"noul": 0.0},
+            "external_side_effect": {"noul": 0.0},
+            "destructive": {"noul": 0.6},
+            "secrets_involved": {"noul": 0.0},
+        },
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+    handler, key = _make_handler()
+    with _mock_urlopen(response):
+        with mock.patch.dict(os.environ, {"TYPESAFE_AI_API_KEY": key}):
+            result = asyncio.run(
+                handler(
+                    {
+                        "pack": "gate_risk",
+                        "state": {"action_text": "x", "threshold_overrides": {"destructive": "high"}},
+                    }
+                )
+            )
+    envelope = json.loads(result)
+    # Invalid override ignored; destructive stays below the default 0.9 threshold.
+    assert envelope["decisions"]["destructive"]["confident"] is False
+    assert envelope["decisions"]["destructive"]["threshold"] == 0.9
+
+    with _mock_urlopen(response):
+        with mock.patch.dict(os.environ, {"TYPESAFE_AI_API_KEY": key}):
+            result2 = asyncio.run(
+                handler(
+                    {
+                        "pack": "gate_risk",
+                        "state": {"action_text": "x", "threshold_overrides": {"destructive": 1.5}},
+                    }
+                )
+            )
+    envelope2 = json.loads(result2)
+    assert envelope2["decisions"]["destructive"]["confident"] is False
+    assert envelope2["decisions"]["destructive"]["threshold"] == 0.9
+
+
 def test_retry_once_on_429():
     call_count = 0
     raw_ok = json.dumps(_ROUTE_INTENT_RESPONSE).encode()
