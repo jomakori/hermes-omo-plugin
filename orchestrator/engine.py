@@ -30,7 +30,6 @@ from orchestrator.models import (
     PENDING,
     RUNNING,
     SUCCEEDED,
-    UNAUTHENTICATED,
     UNFINISHED,
     Run,
     Worker,
