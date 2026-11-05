@@ -21,6 +21,7 @@ from orchestrator.chains import (
     render_hop_trail,
     status_from_message,
 )
+from orchestrator.crash_reason import crash_reason_for
 from orchestrator.guards import GuardError, check_delegation
 from orchestrator.models import (
     CANCELLED,
@@ -229,6 +230,7 @@ class OmoEngine:
                     continue
                 worker.status = INTERRUPTED
                 worker.error = INTERRUPTED_ERROR
+                worker.crash_reason = crash_reason_for(worker.error)
                 worker.finished_at = worker.finished_at or time.time()
                 run.recovered = True
                 # Name the interruption on the live message too, so a restart that
@@ -730,6 +732,7 @@ class OmoEngine:
             # provider-wide failure, end at the premium hop again.
             worker.status = FAILED
             worker.error = self._attempts_exhausted_error(worker)
+            worker.crash_reason = crash_reason_for(worker.error)
             worker.finished_at = time.time()
             self._progress("worker_failed", self._worker_event(run, worker))
             return self._outcome(run, worker)
@@ -749,6 +752,7 @@ class OmoEngine:
                         pass
                     worker.status = CANCELLED
                     worker.error = worker.error or "cancelled before start"
+                    worker.crash_reason = crash_reason_for(worker.error)
                     worker.finished_at = time.time()
                     self._progress("worker_cancelled", self._worker_event(run, worker))
                     return self._outcome(run, worker)
@@ -769,6 +773,7 @@ class OmoEngine:
                         # chain is untouched — this says nothing about the model.
                         worker.status = FAILED
                         worker.error = silent_error
+                        worker.crash_reason = crash_reason_for(worker.error)
                         worker.finished_at = time.time()
                         self._progress("worker_failed", self._worker_event(run, worker))
                         return self._outcome(run, worker)
@@ -780,6 +785,7 @@ class OmoEngine:
                         # is untouched and the outcome is simply FAILED.
                         worker.status = FAILED
                         worker.error = artifact_error
+                        worker.crash_reason = crash_reason_for(worker.error)
                         worker.finished_at = time.time()
                         self._progress("worker_failed", self._worker_event(run, worker))
                         return self._outcome(run, worker)
@@ -841,6 +847,7 @@ class OmoEngine:
                 # or a transient quota drain would wrongly block every future
                 # walk for this stage until a human intervenes.
                 self._record_stage_failure(worker)
+        worker.crash_reason = crash_reason_for(worker.error)
         # The walk is over: keep which hops were tried and why they were dropped,
         # whatever the terminal state (cancelled hops are history too).
         worker.hop_history = list(state.hop_history)
@@ -1180,6 +1187,7 @@ class OmoEngine:
         if worker.cancel_requested:
             worker.status = CANCELLED
             worker.error = worker.error or "cancelled"
+            worker.crash_reason = crash_reason_for(worker.error)
             self._progress("worker_cancelled", self._worker_event(run, worker))
             self._persist()
             return
