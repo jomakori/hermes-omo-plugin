@@ -15,7 +15,9 @@ JEV_SCHEMA: dict[str, Any] = {
     "description": (
         "Ask the TypeSafe Jev typed-decision classifier for a probabilistic verdict on a pack "
         "(route_intent, gate_risk, pick_skill, pick_agent). Returns a code-authored advisory envelope — "
-        "Jev never executes anything; code owns the action."
+        "Jev never executes anything; code owns the action. For 'noul'-type questions (e.g. every "
+        "gate_risk question), each decision also carries 'margin' (abs(score - threshold), 3dp) and "
+        "'strength' ('strong' | 'moderate' | 'weak', bucketed from margin) alongside 'confident'."
     ),
     "parameters": {
         "type": "object",
@@ -30,7 +32,10 @@ JEV_SCHEMA: dict[str, Any] = {
                 "description": (
                     "State keys for the pack. "
                     "route_intent / pick_agent: {user_message, last_question, cwd_basename}. "
-                    "gate_risk: {action_text, dry_run}. "
+                    "gate_risk: {action_text, dry_run, threshold_overrides}. "
+                    "threshold_overrides (gate_risk only, optional): per-call confidence threshold "
+                    "overrides, e.g. {irreversible: 0..1, external_side_effect: 0..1, destructive: 0..1, "
+                    "secrets_involved: 0..1}; all keys optional, out-of-range/non-numeric values ignored. "
                     "pick_skill: {user_request, shortlist}."
                 ),
             },
@@ -145,11 +150,22 @@ def make_jev_handler(
 
         raw_answers: dict[str, Any] = response.get("answers", {})
         usage: dict[str, Any] = response.get("usage", {})
+        call_overrides = {}
+        if pack_name == "gate_risk":
+            # Per-call override wins on keys it sets; wiring-time value still applies elsewhere.
+            raw_overrides = state_input.get("threshold_overrides")
+            if isinstance(raw_overrides, dict):
+                for qid, val in raw_overrides.items():
+                    if isinstance(val, bool) or not isinstance(val, (int, float)):
+                        continue
+                    if 0.0 <= float(val) <= 1.0:
+                        call_overrides[qid] = float(val)
+        merged_overrides = {**(threshold_overrides or {}), **call_overrides}
         decisions = apply_policy(
             pack_name=pack_name,
             answers=raw_answers,
             raw_questions=pack.questions,
-            threshold_overrides=threshold_overrides,
+            threshold_overrides=merged_overrides or None,
         )
 
         return build_envelope(
