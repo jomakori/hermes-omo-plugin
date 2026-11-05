@@ -194,6 +194,48 @@ def test_threshold_policy_gate_risk_borderline():
     assert decisions["secrets_involved"]["confident"] is False
 
 
+def test_noul_margin_strength_far_below_threshold():
+    pack = PACKS["gate_risk"]
+    answers = {
+        "irreversible": {"noul": 0.05},
+        "external_side_effect": {"noul": 0.0},
+        "destructive": {"noul": 0.0},
+        "secrets_involved": {"noul": 0.0},
+    }
+    decisions = apply_policy("gate_risk", answers, pack.questions)
+    assert decisions["irreversible"]["confident"] is False
+    assert decisions["irreversible"]["margin"] == 0.85
+    assert decisions["irreversible"]["strength"] == "strong"
+
+
+def test_noul_margin_strength_just_below_threshold():
+    pack = PACKS["gate_risk"]
+    answers = {
+        "irreversible": {"noul": 0.89},
+        "external_side_effect": {"noul": 0.0},
+        "destructive": {"noul": 0.0},
+        "secrets_involved": {"noul": 0.0},
+    }
+    decisions = apply_policy("gate_risk", answers, pack.questions)
+    assert decisions["irreversible"]["confident"] is False
+    assert decisions["irreversible"]["margin"] == 0.01
+    assert decisions["irreversible"]["strength"] == "weak"
+
+
+def test_noul_margin_strength_far_above_threshold():
+    pack = PACKS["gate_risk"]
+    answers = {
+        "irreversible": {"noul": 0.0},
+        "external_side_effect": {"noul": 0.0},
+        "destructive": {"noul": 0.0},
+        "secrets_involved": {"noul": 0.95},
+    }
+    decisions = apply_policy("gate_risk", answers, pack.questions)
+    assert decisions["secrets_involved"]["confident"] is True
+    assert decisions["secrets_involved"]["margin"] == 0.45
+    assert decisions["secrets_involved"]["strength"] == "strong"
+
+
 def test_retry_once_on_429():
     call_count = 0
     raw_ok = json.dumps(_ROUTE_INTENT_RESPONSE).encode()

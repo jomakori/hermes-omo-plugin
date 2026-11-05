@@ -15,7 +15,9 @@ JEV_SCHEMA: dict[str, Any] = {
     "description": (
         "Ask the TypeSafe Jev typed-decision classifier for a probabilistic verdict on a pack "
         "(route_intent, gate_risk, pick_skill, pick_agent). Returns a code-authored advisory envelope — "
-        "Jev never executes anything; code owns the action."
+        "Jev never executes anything; code owns the action. For 'noul'-type questions (e.g. every "
+        "gate_risk question), each decision also carries 'margin' (abs(score - threshold), 3dp) and "
+        "'strength' ('strong' | 'moderate' | 'weak', bucketed from margin) alongside 'confident'."
     ),
     "parameters": {
         "type": "object",

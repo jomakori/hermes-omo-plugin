@@ -30,10 +30,20 @@ def _verdict(question_id: str, answer: dict[str, Any], threshold: float) -> dict
     if q_type == "noul":
         score = float(answer.get("noul", 0.0))
         confident = score >= threshold
+        margin = round(abs(score - threshold), 3)
+        # Bucket margin into a human-readable strength label (additive; does not affect `confident`).
+        if margin >= 0.3:
+            strength = "strong"
+        elif margin >= 0.1:
+            strength = "moderate"
+        else:
+            strength = "weak"
         return {
             "value": score,
             "threshold": threshold,
             "confident": confident,
+            "margin": margin,
+            "strength": strength,
             "source": "jev",
             "guidance": (
                 "Jev flags this risk; code must decide whether to proceed."
