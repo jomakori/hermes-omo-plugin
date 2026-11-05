@@ -299,6 +299,31 @@ def test_graph_allows_overlapping_write_paths_when_ordered_by_a_dependency():
     assert payload["status"] == "succeeded"
 
 
+def test_graph_rejects_concurrent_tasks_with_overlapping_literal_prefixes():
+    # 'src/a*' and 'src/*.py' both match src/a.py; fnmatch missed this, the
+    # literal-prefix rule ('src/a' starts with 'src/') catches it.
+    engine = make_engine(ScriptedLifecycle())
+    with pytest.raises(GuardError, match="overlapping write_paths"):
+        engine.dispatch_graph(
+            tasks=[
+                {"id": "a", "agent": "explore", "prompt": "task a", "write_paths": ["src/a*"]},
+                {"id": "b", "agent": "librarian", "prompt": "task b", "write_paths": ["src/*.py"]},
+            ]
+        )
+
+
+def test_graph_accepts_concurrent_tasks_with_disjoint_literal_prefixes():
+    lifecycle = ScriptedLifecycle()
+    engine = make_engine(lifecycle)
+    payload = engine.dispatch_graph(
+        tasks=[
+            {"id": "a", "agent": "explore", "prompt": "task a", "write_paths": ["src/a/*"]},
+            {"id": "b", "agent": "librarian", "prompt": "task b", "write_paths": ["src/b/*"]},
+        ]
+    )
+    assert payload["status"] == "succeeded"
+
+
 def test_graph_without_write_paths_keeps_current_behaviour():
     # No task declares write_paths: the overlap check must be a no-op.
     lifecycle = ScriptedLifecycle(delay=0.05)

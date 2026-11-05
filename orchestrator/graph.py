@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextvars
 import dataclasses
-import fnmatch
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -43,6 +42,12 @@ REVIEW_INSTRUCTION = (
     "Review the work above as an internal critic. Reply with JSON only, no prose: "
     '{"verdict": "pass"|"problems", "problems": ["<what is wrong>", ...]}'
 )
+
+
+def _literal_prefix(pattern: str) -> str:
+    """Everything before the glob's first wildcard char (*, ?, or [)."""
+    cut = min((i for i in (pattern.find(c) for c in "*?[") if i != -1), default=len(pattern))
+    return pattern[:cut]
 
 
 def _hop_note(worker: Worker) -> str:
@@ -168,9 +173,10 @@ class TaskGraph:
             for b in writers[i + 1 :]:
                 if b["id"] in ancestors_of(a["id"]) or a["id"] in ancestors_of(b["id"]):
                     continue  # ordered by a dependency path: never runs concurrently
-                # Overlap means a glob match either way: literal prefix or exact equality.
+                # Overlap: one glob's literal prefix (text before its first */?/[) starts the other's.
                 if any(
-                    fnmatch.fnmatch(pa, pb) or fnmatch.fnmatch(pb, pa)
+                    _literal_prefix(pa).startswith(_literal_prefix(pb))
+                    or _literal_prefix(pb).startswith(_literal_prefix(pa))
                     for pa in a["write_paths"]
                     for pb in b["write_paths"]
                 ):
