@@ -190,6 +190,12 @@ class Worker:
     # ended (see orchestrator.crash_reason.crash_reason_for). Empty for a
     # worker that never reached a terminal failure state.
     crash_reason: dict[str, Any] = field(default_factory=dict)
+    # Marks a worker spawned by the self-patch auto-dispatch (see
+    # orchestrator.self_patch and OmoEngine._maybe_dispatch_self_patch): the
+    # terminal-state hook checks this before ever building a new self-patch
+    # task, so a self-patch run's own failure can never spawn another one.
+    # Empty for every normal dispatch.
+    origin: str = ""
 
     def as_row(self) -> dict[str, Any]:
         spec = agent(self.agent_name)
@@ -253,6 +259,7 @@ class Worker:
             "review_verdict": self.review_verdict,
             "hop_history": [hop for hop in self.hop_history if isinstance(hop, dict)],
             "crash_reason": dict(self.crash_reason) if isinstance(self.crash_reason, dict) else {},
+            "origin": self.origin,
             "activity_session": self.activity_session,
             "last_activity_at": self.last_activity_at,
             "started_at": self.started_at,
@@ -280,6 +287,7 @@ class Worker:
             review_verdict=str(payload.get("review_verdict") or ""),
             hop_history=[hop for hop in payload.get("hop_history") or () if isinstance(hop, dict)],
             crash_reason=dict(payload["crash_reason"]) if isinstance(payload.get("crash_reason"), dict) else {},
+            origin=str(payload.get("origin") or ""),
             activity_session=as_optional_str(payload.get("activity_session")),
             last_activity_at=as_float(payload.get("last_activity_at")),
             started_at=as_float(payload.get("started_at")),
