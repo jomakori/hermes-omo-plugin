@@ -19,6 +19,12 @@ FAILED = "FAILED"
 INTERRUPTED = "INTERRUPTED"
 _TRIGGERING_TERMINAL_STATES = (FAILED, INTERRUPTED)
 
+# The marker a spawned self-patch run's own worker is tagged with (see
+# ``orchestrator.models.Worker.origin``). The wiring in ``orchestrator.engine``
+# checks this before ever building a new self-patch task for a finished run,
+# so a self-patch run's own failure can never spawn another one.
+SELF_PATCH_ORIGIN = "self_patch"
+
 # A self-patch must never be able to weaken the CI gate that would catch a bad
 # self-patch. Hardcoded, not a config knob a self-patch could itself edit around.
 FORBIDDEN_PATHS = (".github/workflows", "ci.yaml", "ci.yml")
@@ -104,6 +110,7 @@ def build_self_patch_task(
 __all__ = [
     "build_self_patch_task",
     "SELF_PATCH_INSTRUCTION",
+    "SELF_PATCH_ORIGIN",
     "FORBIDDEN_PATHS",
     "TITLE_MAX_CHARS",
 ]

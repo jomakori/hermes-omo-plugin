@@ -35,6 +35,7 @@ from orchestrator.models import (
     Worker,
 )
 from orchestrator.personas import MAX_CONTEXT_CHARS, compose_context
+from orchestrator.self_patch import SELF_PATCH_ORIGIN, build_self_patch_task
 from roster import AGENTS, CATEGORIES, ROLE_ALIASES
 
 # The last element of a chain is the premium, quota-bounded route, so the hop onto
@@ -224,6 +225,7 @@ class OmoEngine:
         adopted = {run_id: run for run_id, run in self._store.load().items() if run_id not in self.runs}
         if not adopted:
             return
+        newly_interrupted: list[Worker] = []
         for run in adopted.values():
             for worker in run.workers:
                 if worker.status not in UNFINISHED:
@@ -233,6 +235,7 @@ class OmoEngine:
                 worker.crash_reason = crash_reason_for(worker.error)
                 worker.finished_at = worker.finished_at or time.time()
                 run.recovered = True
+                newly_interrupted.append(worker)
                 # Name the interruption on the live message too, so a restart that
                 # re-attaches to the same message renders ⚠️ rather than leaving a
                 # stuck 🔁 (best-effort: a host with no listener just drops it).
@@ -245,6 +248,11 @@ class OmoEngine:
         # is gone, and a second reader must not have to rediscover it.
         with self._persist_lock:
             self._store.save(dict(self.runs))
+        # After the adopted runs are actually in `self.runs` and on disk: a
+        # self-patch dispatch calls back into `self.dispatch`, which persists its
+        # own new run, and that write must not race the adoption write above.
+        for worker in newly_interrupted:
+            self._maybe_dispatch_self_patch(worker)
 
     def _persist(self) -> None:
         """Checkpoint the registry: a restart must find the work, not an empty list."""
@@ -358,6 +366,7 @@ class OmoEngine:
         background: bool = False,
         parent_agent: str | None = None,
         title: str | None = None,
+        origin: str = "",
     ) -> dict[str, Any]:
         name, chain, routed_by = self._resolve_dispatch_target(
             goal=goal, target=target, category=category, parent_agent=parent_agent
@@ -382,6 +391,11 @@ class OmoEngine:
             chain=chain,
             title=str(title or "").strip(),
             model=chain[0] if chain else None,
+            # Tagged before anything else touches this worker: the recursion
+            # guard in _maybe_dispatch_self_patch checks this first and
+            # unconditionally refuses a second self-patch dispatch from a run
+            # that was itself a self-patch follow-up.
+            origin=origin,
         )
         run.workers.append(worker)
         # Observation only: Jev runs beside the resolved decision and never feeds
@@ -1153,6 +1167,45 @@ class OmoEngine:
         except Exception:
             return
 
+    def _maybe_dispatch_self_patch(self, worker: Worker) -> None:
+        """Auto-dispatch a diagnostic follow-up for a FAILED/INTERRUPTED worker.
+
+        Recursion guard first, unconditionally: a worker that is itself a
+        self-patch follow-up (tagged ``origin=SELF_PATCH_ORIGIN`` at dispatch
+        time, see ``dispatch()``) never gets a second one built for it, no
+        matter what its own crash_reason says. Everything else -- the feature
+        flag, the terminal-state/crash_reason gate -- is secondary to that.
+
+        ``build_self_patch_task`` already returns ``None`` for WITHHELD (or any
+        non-FAILED/INTERRUPTED state); this only adds the dispatch side effect
+        on top of a non-``None`` spec. Best-effort like the shadow-logging path
+        beside it: a failure here must never turn into a failure of the run
+        that just finished.
+        """
+        if worker.origin == SELF_PATCH_ORIGIN:
+            return
+        if not bool(self._config("self_patch_enabled", True)):
+            return
+        try:
+            task = build_self_patch_task(
+                run_id=worker.run_id,
+                terminal_state=worker.status,
+                title=worker.title or worker.task,
+                crash_reason=worker.crash_reason,
+            )
+            if task is None:
+                return
+            self.dispatch(
+                goal=task["goal"],
+                category="deep",
+                context=task.get("context"),
+                background=True,
+                title=task.get("title"),
+                origin=SELF_PATCH_ORIGIN,
+            )
+        except Exception:
+            return
+
     def _outcome(self, run: Run, worker: Worker) -> dict[str, Any]:
         # Every terminal transition of a worker funnels through here, so this is the
         # one checkpoint that matters: what the record says the worker got to.
@@ -1161,6 +1214,10 @@ class OmoEngine:
         self._verify_claimed_artifacts(worker)
         self._record_outcome(worker, delivered=worker.status == SUCCEEDED)
         self._persist()
+        # Additive side effect only: does not change what this payload reports
+        # about `worker` itself (see _maybe_dispatch_self_patch's own docstring
+        # for the recursion guard and feature flag that gate it).
+        self._maybe_dispatch_self_patch(worker)
         payload: dict[str, Any] = {
             "run_id": run.run_id,
             "agent": AGENTS[worker.agent_name].display,
