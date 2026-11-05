@@ -418,6 +418,14 @@ def render_hop_trail(hop_history: Sequence[Mapping[str, Any]]) -> str:
     return HOP_ARROW.join(parts)
 
 
+class NoLiveRungError(RuntimeError):
+    """Raised by ``ChainResolver.policy()`` when a chain has no live rung at all."""
+
+
+# R2: the floor every chain falls back to once its own rungs are short.
+DEFAULT_FLOOR_MODEL = "litellm/deepseek-v4-flash-direct"
+
+
 @dataclass
 class ChainResolver:
     config: Mapping[str, Any] = field(default_factory=dict)
@@ -443,10 +451,27 @@ class ChainResolver:
                 return runtime[key]
             return self.config.get(key, fallback)
 
-        return FallbackState(
+        floor = str(knob("floor_model", DEFAULT_FLOOR_MODEL))
+        floor_key = canonical_model(floor)
+        base = self.chain_for(name, default)
+        if provider_benched(floor):
+            # Floor is exempt from the ordinary filter: only the other rungs serve.
+            rest = tuple(m for m in base if canonical_model(m) != floor_key)
+            if not any(not provider_benched(m) for m in rest):
+                raise NoLiveRungError(
+                    f"no live rung for chain '{name}': the floor ({floor}) is down "
+                    "and every other rung is benched"
+                )
+            chain = skip_benched(rest)
+        else:
             # Built per walk, so a bench that has expired is already absent from
             # this chain and the provider returns to it without any scheduler.
-            chain=skip_benched(self.chain_for(name, default)),
+            chain = skip_benched(base)
+            if len(chain) < 2 and floor_key not in {canonical_model(m) for m in chain}:
+                chain = chain + (floor,)
+
+        return FallbackState(
+            chain=chain,
             enabled=bool(knob("enabled", True)),
             retry_on_errors=parse_retry_on_errors(knob("retry_on_errors", None)),
             max_attempts=int(knob("max_fallback_attempts", 3)),
