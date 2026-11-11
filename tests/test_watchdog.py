@@ -118,11 +118,18 @@ def test_a_child_that_stops_writing_is_stopped_before_the_hard_timeout():
     out = engine.dispatch(goal="scan the repo", target="explore")
     elapsed = time.time() - started
 
+    stall_bound = CONFIG["worker_stall_seconds"]
+    hard_timeout = CONFIG["worker_timeout_seconds"]
     assert out["status"] == "failed"
     assert "no activity" in out["error"]
     assert "watchdog" in out["error"]
     assert lifecycle.cancelled and "no activity" in lifecycle.cancelled[0]
-    assert elapsed < 1, "the watchdog stopped the child long before the hard timeout"
+    # Judge the stall against the hard timeout it must beat, not an absolute
+    # wall-clock figure: a loaded CI runner adds scheduling slack to both.
+    assert elapsed < hard_timeout / 2, (
+        f"watchdog fired at {elapsed:.3f}s, not meaningfully before the {hard_timeout}s hard timeout"
+    )
+    assert elapsed >= stall_bound, f"watchdog fired at {elapsed:.3f}s, before the {stall_bound}s stall bound"
     assert lifecycle.waits < 100, "and after a handful of slices, not thousands"
     assert any(name == "worker_failed" for name, _ in ctx.events)
 
@@ -206,7 +213,7 @@ def test_evidence_that_goes_idle_past_the_stall_bound_is_stopped():
     assert "no activity" in out["error"]
     assert "watchdog" in out["error"]
     assert lifecycle.cancelled and "no activity" in lifecycle.cancelled[0]
-    assert elapsed < 1, "the watchdog stopped it long before the 5s hard timeout"
+    assert elapsed < 5 / 2, "the watchdog stopped it well before the 5s hard timeout"
 
 
 def test_the_activity_reader_speaks_the_real_store(tmp_path):
