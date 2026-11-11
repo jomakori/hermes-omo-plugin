@@ -349,9 +349,7 @@ class RetryCoordinator:
         return requeued
 
     # --------------------------------------------------------- escalation
-    def _escalate(
-        self, run: Any, worker: Any, failure_class: str, attempts: int, *, missing: str
-    ) -> dict[str, Any]:
+    def _escalate(self, run: Any, worker: Any, failure_class: str, attempts: int, *, missing: str) -> dict[str, Any]:
         key = _stage_key(worker)
         record = {
             "run_id": str(getattr(run, "run_id", "") or ""),
