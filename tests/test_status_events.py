@@ -126,7 +126,14 @@ def test_engine_emits_bare_event_names():
 
 
 def test_engine_emits_worker_failed_when_the_chain_is_exhausted():
-    ctx, engine = make_engine(ScriptedLifecycle(fail_from=1), config={"max_attempts_per_agent": 3})
+    # auto_retry_enabled=False: this test's scope is the bare event name on
+    # chain exhaustion, not the auto-retry escalation that would otherwise
+    # also fire for this PERMANENT-classified failure (see test_retry_policy.py
+    # for the escalation-emission coverage).
+    ctx, engine = make_engine(
+        ScriptedLifecycle(fail_from=1),
+        config={"max_attempts_per_agent": 3, "auto_retry_enabled": False},
+    )
     engine.dispatch(goal="do the impossible", target="hephaestus")
 
     names = ctx.names()
