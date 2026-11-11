@@ -35,6 +35,38 @@ KIND_COMMIT = "commit"
 # nobody could look. It still fails the gate — an unchecked claim is not a
 # verified one — but it says so in these words rather than claiming absence.
 COULD_NOT_CHECK = "unverified, could not check"
+
+# What git prints when the check could not run at all, as opposed to running and
+# finding nothing. Observed live: "fatal: not a git repository (or any of the
+# parent directories): .git" inside an inherited cwd that was never a clone.
+_LOCAL_ENV_FAILURES = (
+    "not a git repository",
+    "not a working tree",
+    "cannot change to",
+    "outside repository",
+)
+
+# What the forge prints when it positively answered "no such object".
+_FORGE_ABSENT_MARKERS = (
+    "not found",
+    "could not resolve to a pullrequest",
+    "no pull requests found",
+    "http 404",
+)
+
+
+def _local_env_failure(output: str) -> bool:
+    """Whether the local git run failed because there was no repository here."""
+    lowered = output.lower()
+    return any(marker in lowered for marker in _LOCAL_ENV_FAILURES)
+
+
+def _forge_says_absent(output: str) -> bool:
+    """Whether a failed gh call positively said the object does not exist."""
+    lowered = output.lower()
+    return any(marker in lowered for marker in _FORGE_ABSENT_MARKERS)
+
+
 NO_CLAIM_DETAIL = "no branch, PR or commit was claimed; nothing to verify"
 
 __all__ = [
@@ -408,16 +440,35 @@ class SubprocessVerifier:
         number = claim.value.rsplit("#", 1)[-1]
         code, output = self._exec(["gh", "pr", "view", number, "--repo", claim.repo, "--json", "state,url"])
         if code != 0:
-            return Verdict(claim.value, claim.kind, False, f"PR {claim.value} could not be read: {output.strip()}")
+            if _forge_says_absent(output):
+                return Verdict(claim.value, claim.kind, False, f"PR {claim.value} is not on {claim.repo}")
+            return Verdict(claim.value, claim.kind, False, f"{COULD_NOT_CHECK}: gh pr view failed: {output.strip()}")
         return Verdict(claim.value, claim.kind, True, "")
 
     def _commit(self, claim: Claim) -> Verdict:
         code, output = self._exec(["git", "cat-file", "-e", claim.value])
-        if code != 0:
+        if code == 0:
+            return Verdict(claim.value, claim.kind, True, "")
+        if _local_env_failure(output):
+            # The check could not run here (no clone in this cwd). That is the
+            # host's tooling failing, never evidence the commit is absent.
+            if claim.repo:
+                return self._commit_via_forge(claim)
             return Verdict(
-                claim.value, claim.kind, False, f"commit {claim.value} is not a valid object: {output.strip()}"
+                claim.value,
+                claim.kind,
+                False,
+                f"{COULD_NOT_CHECK}: git could not be run from {self.cwd or 'the inherited cwd'}: {output.strip()}",
             )
-        return Verdict(claim.value, claim.kind, True, "")
+        return Verdict(claim.value, claim.kind, False, f"commit {claim.value} is not a valid object: {output.strip()}")
+
+    def _commit_via_forge(self, claim: Claim) -> Verdict:
+        code, output = self._exec(["gh", "api", f"repos/{claim.repo}/commits/{claim.value}", "--jq", ".sha"])
+        if code == 0:
+            return Verdict(claim.value, claim.kind, True, "")
+        if _forge_says_absent(output):
+            return Verdict(claim.value, claim.kind, False, f"commit {claim.value} is not on {claim.repo}")
+        return Verdict(claim.value, claim.kind, False, f"{COULD_NOT_CHECK}: gh api failed: {output.strip()}")
 
 
 def default_verifier() -> SubprocessVerifier:
