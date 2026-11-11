@@ -32,17 +32,54 @@ HOP_REASON_PROVIDER_UNUSABLE = "provider_unusable"
 # that nobody confirmed the work exists — so a reader is not handed a claim as
 # though the host had watched it happen.
 HOP_REASON_UNVERIFIABLE = "unverifiable"
+# A hop dropped before the walk started because it is served by the same
+# provider layer as the hop kept just before it. Nothing was asked of it, so it
+# is not a failure and never spends the fallback budget; it rides the hop trail
+# so a chain shorter than the configured one says where the rest went.
+HOP_REASON_SAME_LAYER = "same_layer"
 
-# --- provider quota benches -------------------------------------------------
+# --- provider layers --------------------------------------------------------
 #
-# A drained subscription window belongs to the provider, not to one alias:
+# A fallback hop is only a fallback when it sits in a different layer from the
+# hop before it: the same key, quota or proxy behind two aliases means the
+# second hop inherits the first one's refusal. `layer_of` is the table that
+# decides this, and it is the only place the stack's lanes are named.
+#
+# `deepseek-v4-flash-go` (opencode-Go plan) and `deepseek-v4-flash-direct` (the
+# direct DeepSeek key) serve the same model through different lanes, so they are
+# two layers; `claude-sonnet-5` and `claude-haiku-4-5` are one proxy and one
+# quota window, so they are one layer.
+LAYER_CLAUDE_PROXY = "claude-proxy"
+LAYER_OPENCODE_GO = "opencode-go"
+LAYER_DEEPSEEK_DIRECT = "deepseek-direct"
+LAYER_KILO = "kilo"
+
+# Kilo serves this whole family through one gateway key, so one drained window
+# covers every alias in it.
+_KILO_PREFIXES = (
+    "kimi-",
+    "bytedance-",
+    "byteplus-coding/",
+    "glm-",
+    "minimax-",
+    "qwen",
+    "gemini-",
+    "gpt-",
+)
+
+# --- layer benches ----------------------------------------------------------
+#
+# A drained window belongs to a layer, not to one alias and not to a brand:
 # claude-sonnet-5 and claude-haiku-4-5 report the same five-hour reset, so
 # benching whichever alias failed first just hands the refusal to its sibling.
-# These benches are keyed by provider and held at module level, so they are
-# shared across walks: the next dispatch starts already benched rather than
-# paying for the same dead hop again. Expiry is the only thing that lifts one.
+# Two aliases that merely share an upstream brand are *not* one layer, though —
+# a Go-plan drain says nothing about the direct DeepSeek key. These benches are
+# held at module level, so they are shared across walks: the next dispatch
+# starts already benched rather than paying for the same dead hop again. Expiry
+# is the only thing that lifts one.
 
-_PROVIDER_BENCH: dict[str, float] = {}
+_LAYER_BENCH: dict[str, float] = {}
+
 
 # "You've hit your session limit - resets 10:30am (UTC)": the proxy's own words.
 _RESET_CLOCK_PATTERN = re.compile(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m", re.IGNORECASE)
@@ -59,18 +96,59 @@ BOUNDED_BENCH_SECONDS = 900.0
 # a misread, not a schedule.
 MAX_BENCH_SECONDS = 6 * 3600.0
 
-# Aliases that bill to one upstream. A prefix is enough: claude-sonnet-5 and
-# claude-haiku-4-5 are one seat, copilot-* another, deepseek-* a third.
-_PROVIDER_ALIASES = ("claude", "copilot", "deepseek")
+
+def bare_alias(model: str) -> str:
+    """The alias as the chain names it, without a `litellm/` routing prefix."""
+    raw = (model or "").strip()
+    while raw.lower().startswith("litellm/"):
+        raw = raw[len("litellm/") :]
+    return raw.lower()
 
 
-def provider_of(model: str) -> str:
-    """The upstream a model alias bills to - one drained window covers them all."""
-    alias = (canonical_model(model) or "").split("/")[-1].lower()
-    for prefix in _PROVIDER_ALIASES:
+def layer_of(model: str) -> str:
+    """Which key/quota/proxy serves this alias - the unit a fallback must leave.
+
+    A hop only falls back when it is served somewhere else than the hop before
+    it. Two aliases on the same key (the Claude proxy's sonnet and haiku share
+    one five-hour window) are one layer however different their names look; the
+    DeepSeek Go plan and the direct DeepSeek key serve the same model through
+    different lanes and are therefore two.
+
+    The table is exhaustive by prefix, with the alias itself as the fallback
+    layer for anything unlisted - an unknown model is never silently merged into
+    a neighbour it may not share a quota with.
+    """
+    alias = bare_alias(model)
+    if not alias:
+        return ""
+    if alias.startswith("claude-"):
+        return LAYER_CLAUDE_PROXY
+    if alias.endswith("-go") or alias.startswith("mimo-"):
+        return LAYER_OPENCODE_GO
+    if alias.endswith("-direct"):
+        return LAYER_DEEPSEEK_DIRECT
+    for prefix in _KILO_PREFIXES:
         if alias.startswith(prefix):
-            return prefix
+            return LAYER_KILO
     return alias
+
+
+def collapse_same_layer(chain: Sequence[str]) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Drop hops served by the same layer as the hop kept just before them.
+
+    Hop 1 is always kept, and the surviving hops keep their configured order.
+    The second element names every dropped hop against the kept hop it repeated
+    (`skipped_model, kept_model`) so the hop trail can say where the length
+    went instead of silently reporting a chain the operator never wrote.
+    """
+    kept: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    for model in chain:
+        if not kept or layer_of(model) != layer_of(kept[-1]):
+            kept.append(model)
+        else:
+            skipped.append((model, kept[-1]))
+    return tuple(kept), tuple(skipped)
 
 
 def reset_at(message: str | None, *, now: float | None = None) -> float | None:
@@ -120,30 +198,30 @@ def _seat_is_drained(reason: str | None) -> bool:
     return str(reason or "") in (HOP_REASON_PROVIDER_UNUSABLE, HOP_REASON_BILLING)
 
 
-def bench_provider(provider: str, until: float, *, now: float | None = None) -> None:
-    """Hold a provider out of every chain until `until`."""
+def bench_layer(layer: str, until: float, *, now: float | None = None) -> None:
+    """Hold a provider layer out of every chain until `until`."""
     current = time.time() if now is None else now
-    if not provider or until <= current:
+    if not layer or until <= current:
         return
     # The longer window wins: a short bounded bench must never shorten a reset
-    # the provider itself has already stated.
-    if until > _PROVIDER_BENCH.get(provider, 0.0):
-        _PROVIDER_BENCH[provider] = until
+    # the layer itself has already stated.
+    if until > _LAYER_BENCH.get(layer, 0.0):
+        _LAYER_BENCH[layer] = until
 
 
-def provider_benched_until(provider: str, *, now: float | None = None) -> float | None:
-    """When this provider may be tried again, or None when it is not benched."""
+def layer_benched_until(layer: str, *, now: float | None = None) -> float | None:
+    """When this layer may be tried again, or None when it is not benched."""
     current = time.time() if now is None else now
-    until = _PROVIDER_BENCH.get(provider)
+    until = _LAYER_BENCH.get(layer)
     if until is None or until <= current:
-        _PROVIDER_BENCH.pop(provider, None)
+        _LAYER_BENCH.pop(layer, None)
         return None
     return until
 
 
-def provider_benched(model: str, *, now: float | None = None) -> bool:
-    """True while the provider behind this alias is held out."""
-    return provider_benched_until(provider_of(model), now=now) is not None
+def layer_benched(model: str, *, now: float | None = None) -> bool:
+    """True while the layer behind this alias is held out."""
+    return layer_benched_until(layer_of(model), now=now) is not None
 
 
 def skip_benched(chain: Sequence[str], *, now: float | None = None) -> tuple[str, ...]:
@@ -155,12 +233,12 @@ def skip_benched(chain: Sequence[str], *, now: float | None = None) -> tuple[str
     move to, and one refusal says so more cheaply than a hard stop.
     """
     models = tuple(chain)
-    return tuple(model for model in models if not provider_benched(model, now=now)) or models
+    return tuple(model for model in models if not layer_benched(model, now=now)) or models
 
 
 def clear_bench() -> None:
     """Drop every bench (tests only)."""
-    _PROVIDER_BENCH.clear()
+    _LAYER_BENCH.clear()
 
 
 _RETRYABLE_PATTERN = re.compile(
@@ -310,6 +388,11 @@ class FallbackState:
     # Per-hop outcome of this walk, in order, as {model, reason}: copied onto the
     # worker row so a cascade is legible after the fact.
     hop_history: list[dict[str, str]] = field(default_factory=list)
+    # Hops dropped at build time for sharing a layer with the hop kept before
+    # them, as (dropped_model, kept_model). They were never attempted, so they
+    # stay out of `chain`, `current_index` and `attempt_count`; `trace` splices
+    # them back into the trail where the chain had them.
+    skipped: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.original and self.chain:
@@ -357,25 +440,52 @@ class FallbackState:
         """Bench the model and record why this hop was abandoned.
 
         When the reason says the seat itself is unusable, the bench widens from
-        this alias to its whole provider and lasts as long as the refusal says:
-        the reset it names, or a bounded window when it names none.
+        this alias to its whole layer and lasts as long as the refusal says:
+        the reset it names, or a bounded window when it names none. Widening to
+        the layer - not to the brand - is what keeps a drained Go plan from
+        deleting the direct key's hop out of the same walk.
         """
         current = time.time() if now is None else now
         self.cooldowns[model] = current + self.cooldown_seconds
         if reason:
             self.hop_history.append({"model": model, "reason": reason})
-        # Two things bench a whole provider, and both are evidence the drain
-        # belongs to the provider rather than to this hop: a refusal that names
+        # Two things bench a whole layer, and both are evidence the drain
+        # belongs to the layer rather than to this hop: a refusal that names
         # when its window refills (Claude's rolling five hours), or one that
         # says the account is out with no time attached (a quota drain). A bare
         # 429 is neither, so it stays a cooldown on the one model.
         reset = reset_at(message, now=current)
         if reset is not None or _seat_is_drained(reason):
-            bench_provider(provider_of(model), reset or (current + BOUNDED_BENCH_SECONDS), now=current)
+            bench_layer(layer_of(model), reset or (current + BOUNDED_BENCH_SECONDS), now=current)
 
     def record_success(self, model: str) -> None:
         """Record the hop that served the request — where this walk exited."""
         self.hop_history.append({"model": model, "reason": HOP_REASON_SUCCESS})
+
+    def trace(self) -> list[dict[str, str]]:
+        """The walk as a reader sees it, with the dropped hops still in place.
+
+        Attempted hops come in the order they were tried; each hop dropped for
+        sharing a layer rides directly behind the kept hop it repeated, so a
+        chain shorter than the configured one still accounts for every entry the
+        operator wrote. A dropped hop is never a failure: nothing was asked of
+        it, and it spent none of the fallback budget.
+        """
+        trail: list[dict[str, str]] = []
+        pending = list(self.skipped)
+        for hop in self.hop_history:
+            trail.append(hop)
+            served = canonical_model(str(hop.get("model") or ""))
+            for skipped in tuple(pending):
+                if canonical_model(skipped[1]) == served:
+                    trail.append({"model": bare_alias(skipped[0]), "reason": HOP_REASON_SAME_LAYER})
+                    pending.remove(skipped)
+        # A dropped hop whose keeper the walk never reached (a stage that failed
+        # on hop 1) leads the trail rather than closing it: the last entry must
+        # stay the hop the walk actually ended on, which is what the retry
+        # policy reads to decide why the stage stopped.
+        trail[:0] = [{"model": bare_alias(dropped), "reason": HOP_REASON_SAME_LAYER} for dropped, _kept in pending]
+        return trail
 
     def primary_if_recovered(self, *, now: float | None = None) -> str | None:
         if self.restore_primary_after_cooldown and not self.in_cooldown(self.original, now):
@@ -443,10 +553,15 @@ class ChainResolver:
                 return runtime[key]
             return self.config.get(key, fallback)
 
+        # Built per walk, so a bench that has expired is already absent from
+        # this chain and the layer returns to it without any scheduler. A hop
+        # sharing the previous hop's layer is not a fallback at all - it would
+        # meet the same refusal one hop later - so it is collapsed here and
+        # named in `skipped` for the trail.
+        chain, skipped = collapse_same_layer(skip_benched(self.chain_for(name, default)))
         return FallbackState(
-            # Built per walk, so a bench that has expired is already absent from
-            # this chain and the provider returns to it without any scheduler.
-            chain=skip_benched(self.chain_for(name, default)),
+            chain=chain,
+            skipped=skipped,
             enabled=bool(knob("enabled", True)),
             retry_on_errors=parse_retry_on_errors(knob("retry_on_errors", None)),
             max_attempts=int(knob("max_fallback_attempts", 3)),

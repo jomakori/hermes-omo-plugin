@@ -820,7 +820,7 @@ class OmoEngine:
                         return self._outcome(run, worker)
                     worker.status = SUCCEEDED
                     state.record_success(worker.model or "")
-                    worker.hop_history = list(state.hop_history)
+                    worker.hop_history = state.trace()
                     worker.finished_at = time.time()
                     self._progress("worker_succeeded", self._worker_event(run, worker))
                     return self._outcome(run, worker)
@@ -878,8 +878,10 @@ class OmoEngine:
                 self._record_stage_failure(worker)
         worker.crash_reason = crash_reason_for(worker.error)
         # The walk is over: keep which hops were tried and why they were dropped,
-        # whatever the terminal state (cancelled hops are history too).
-        worker.hop_history = list(state.hop_history)
+        # whatever the terminal state (cancelled hops are history too). A hop
+        # collapsed for sharing a layer rides here as `same_layer`, so a chain
+        # shorter than the configured one still accounts for every entry.
+        worker.hop_history = state.trace()
         worker.finished_at = time.time()
         # The chain-walk terminal states (cancel/fallback-exhausted) do not pass
         # through the early returns above, so name them here too or the live
