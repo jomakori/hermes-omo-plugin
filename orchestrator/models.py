@@ -222,6 +222,11 @@ class Worker:
     # ended (see orchestrator.crash_reason.crash_reason_for). Empty for a
     # worker that never reached a terminal failure state.
     crash_reason: dict[str, Any] = field(default_factory=dict)
+    # The bounded failure class this terminal outcome was sorted into (see
+    # orchestrator.retry_policy.classify_failure): TIMEOUT, PROVIDER_UNUSABLE,
+    # STALL, VERIFIER_MISMATCH, DEPENDENCY_BLOCKED, or PERMANENT. Empty until
+    # an auto-retry evaluation has classified the worker.
+    failure_class: str = ""
     # Marks a worker spawned by the self-patch auto-dispatch (see
     # orchestrator.self_patch and OmoEngine._maybe_dispatch_self_patch): the
     # terminal-state hook checks this before ever building a new self-patch
@@ -272,6 +277,8 @@ class Worker:
             row["hop_history"] = self.hop_history
         if self.crash_reason:
             row["crash_reason"] = dict(self.crash_reason)
+        if self.failure_class:
+            row["failure_class"] = self.failure_class
         return row
 
     def to_dict(self) -> dict[str, Any]:
@@ -291,6 +298,7 @@ class Worker:
             "review_verdict": self.review_verdict,
             "hop_history": [hop for hop in self.hop_history if isinstance(hop, dict)],
             "crash_reason": dict(self.crash_reason) if isinstance(self.crash_reason, dict) else {},
+            "failure_class": self.failure_class,
             "origin": self.origin,
             "activity_session": self.activity_session,
             "last_activity_at": self.last_activity_at,
@@ -319,6 +327,7 @@ class Worker:
             review_verdict=str(payload.get("review_verdict") or ""),
             hop_history=[hop for hop in payload.get("hop_history") or () if isinstance(hop, dict)],
             crash_reason=dict(payload["crash_reason"]) if isinstance(payload.get("crash_reason"), dict) else {},
+            failure_class=str(payload.get("failure_class") or ""),
             origin=str(payload.get("origin") or ""),
             activity_session=as_optional_str(payload.get("activity_session")),
             last_activity_at=as_float(payload.get("last_activity_at")),

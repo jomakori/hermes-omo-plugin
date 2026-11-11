@@ -36,6 +36,13 @@ from orchestrator.models import (
     demote_unauthenticated,
 )
 from orchestrator.personas import MAX_CONTEXT_CHARS, compose_context
+from orchestrator.retry_policy import (
+    DEFAULT_BACKOFF_BASE_SECONDS,
+    DEFAULT_BACKOFF_CAP_SECONDS,
+    DEFAULT_BACKOFF_FACTOR,
+    RetryCoordinator,
+    exponential_backoff_with_jitter,
+)
 from orchestrator.self_patch import SELF_PATCH_ORIGIN, build_self_patch_task
 from roster import AGENTS, CATEGORIES, ROLE_ALIASES
 
@@ -180,6 +187,10 @@ class OmoEngine:
         # orchestrator.artifact_verify). Injectable so a test can answer without
         # git, gh or a network; production uses the subprocess verifier.
         self.artifact_verifier: Any = None
+        # Bounded automatic re-dispatch (see orchestrator.retry_policy). Built
+        # lazily so production wires it to this engine's own dispatch/reverify
+        # without a test ever having to construct one of its own.
+        self._retry_coordinator: RetryCoordinator | None = None
 
     def _verifier(self) -> Any:
         if self.artifact_verifier is None:
@@ -1212,6 +1223,86 @@ class OmoEngine:
         except Exception:
             return
 
+    def _get_retry_coordinator(self) -> RetryCoordinator:
+        """The bounded auto-retry coordinator, built once and wired to this engine.
+
+        Lazy, not module-level: a RetryCoordinator carries per-worker attempt
+        counters and must not be shared across engine instances (each test
+        builds its own OmoEngine and must start with a clean counter).
+        """
+        if self._retry_coordinator is None:
+            self._retry_coordinator = RetryCoordinator(
+                dispatch=self.dispatch,
+                reverify=self._reverify,
+                backoff=lambda attempt: exponential_backoff_with_jitter(
+                    attempt,
+                    base=float(self._config("retry_backoff_base_seconds", DEFAULT_BACKOFF_BASE_SECONDS)),
+                    factor=float(self._config("retry_backoff_factor", DEFAULT_BACKOFF_FACTOR)),
+                    cap=float(self._config("retry_backoff_cap_seconds", DEFAULT_BACKOFF_CAP_SECONDS)),
+                ),
+            )
+        return self._retry_coordinator
+
+    def _reverify(self, worker: Worker) -> dict[str, Any]:
+        """Re-run artifact verification only for VERIFIER_MISMATCH — never the task.
+
+        A SUCCEEDED claim that was demoted to UNAUTHENTICATED (see
+        ``orchestrator.models.demote_unauthenticated``) may have been demoted on
+        a transient read — a branch that had not yet propagated when the first
+        check ran. Re-running the same check can recover from that without ever
+        re-running the worker's own task. A check that now verifies restores
+        SUCCEEDED; one that still fails leaves the worker demoted and hands the
+        policy what it still could not read, for the escalation record.
+        """
+        try:
+            verification = verification_for(worker.result, self._verifier())
+        except Exception as exc:  # noqa: BLE001 - the gate must never raise
+            verification = {
+                "verifiable": True,
+                "verified": False,
+                "reason": HOP_REASON_UNVERIFIABLE,
+                "detail": f"{COULD_NOT_CHECK}: {exc}",
+            }
+        worker.verification = verification
+        if verification.get("verifiable") and verification.get("verified"):
+            worker.status = SUCCEEDED
+        self._persist()
+        return verification
+
+    def _maybe_auto_retry(self, run: Run, worker: Worker) -> None:
+        """Bounded automatic re-dispatch for this worker's terminal outcome.
+
+        Best-effort and additive, like the self-patch hook beside it: a broken
+        coordinator must never turn into a failure of the run that just
+        finished. Feature-flagged (``auto_retry_enabled``, default on) so a
+        deployment can turn it off with no code change. A SUCCEEDED worker with
+        a task_id is the DEPENDENCY_BLOCKED unblock signal — it re-queues
+        whatever was waiting on this task rather than being classified itself
+        (``RetryCoordinator.evaluate`` is a no-op for SUCCEEDED anyway).
+        """
+        if not bool(self._config("auto_retry_enabled", True)):
+            return
+        try:
+            coordinator = self._get_retry_coordinator()
+            if worker.status == SUCCEEDED and worker.task_id:
+                coordinator.on_parent_succeeded(worker.task_id)
+                return
+            escalation = coordinator.evaluate(run, worker)
+            if escalation is not None:
+                self._progress("retry_escalated", {**self._worker_event(run, worker), **escalation})
+        except Exception:
+            return
+
+    def pending_escalations(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        """Every auto-retry escalation on record, retrievable through the tool surface.
+
+        So the calling orchestrator persona can read what is actually blocked
+        and re-dispatch with a plan change, instead of guessing or blind-retrying.
+        """
+        if self._retry_coordinator is None:
+            return []
+        return self._retry_coordinator.pending_escalations(run_id)
+
     def _outcome(self, run: Run, worker: Worker) -> dict[str, Any]:
         # Every terminal transition of a worker funnels through here, so this is the
         # one checkpoint that matters: what the record says the worker got to.
@@ -1227,6 +1318,10 @@ class OmoEngine:
         # about `worker` itself (see _maybe_dispatch_self_patch's own docstring
         # for the recursion guard and feature flag that gate it).
         self._maybe_dispatch_self_patch(worker)
+        # Bounded automatic re-dispatch, classified and policy-driven (see
+        # orchestrator.retry_policy). Additive like the two hooks above: never
+        # changes what this payload reports about `worker`.
+        self._maybe_auto_retry(run, worker)
         payload: dict[str, Any] = {
             "run_id": run.run_id,
             "agent": AGENTS[worker.agent_name].display,
@@ -1353,6 +1448,10 @@ class OmoEngine:
                 "tree": run.tree(),
                 "workers": [w.as_row() for w in run.workers],
                 "claim_boundary": claim_boundary(),
+                # Retrievable here rather than only printed, so the calling
+                # orchestrator persona can see a bounded-retry exhaustion and
+                # re-dispatch with a plan change instead of a blind retry.
+                "escalations": self.pending_escalations(run_id),
             }
         visible = [run for run in self.runs.values() if all_sessions or session.belongs_to(run, caller)]
         payload: dict[str, Any] = {
@@ -1360,6 +1459,7 @@ class OmoEngine:
             "session_id": caller,
             "scope": "all_sessions" if all_sessions else "session",
             "claim_boundary": claim_boundary(),
+            "escalations": [e for e in self.pending_escalations() if e["run_id"] in {r.run_id for r in visible}],
         }
         hidden = len(self.runs) - len(visible)
         if hidden:
