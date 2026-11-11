@@ -19,6 +19,8 @@ what to do about an unverified claim stays with the reader.
 
 from __future__ import annotations
 
+import os
+import pathlib
 import re
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -53,6 +55,14 @@ _FORGE_ABSENT_MARKERS = (
     "no pull requests found",
     "http 404",
 )
+
+
+# The token names this host already uses for GitHub; both carry the same value.
+# Read here rather than invented, so the verifier authenticates with the same
+# credential every other GitHub call in the host honours.
+GH_TOKEN_ENV = "GH_TOKEN"
+MCP_GITHUB_TOKEN_ENV = "MCP_GITHUB_TOKEN"
+_TOKEN_ENVS = (GH_TOKEN_ENV, MCP_GITHUB_TOKEN_ENV)
 
 
 def _local_env_failure(output: str) -> bool:
@@ -375,10 +385,48 @@ def verification_for(result: Any, verifier: ArtifactVerifier) -> dict[str, Any]:
 # -------------------------------------------------------- the real verifier
 
 
-def _run(command: Sequence[str], cwd: str | None, timeout_s: float) -> tuple[int, str]:
+def _repo_root(start: str | pathlib.Path | None = None) -> str | None:
+    """The nearest directory at or above ``start`` that is a git work tree.
+
+    The verifier used to subprocess git in whatever cwd the gateway inherited.
+    Outside a checkout git answers ``fatal: not a git repository``, which the
+    gate classifies as "could not check" -- correct, but it also means a real
+    claim can never be confirmed. Resolving the checkout from this module's own
+    location gives git a repository it can actually answer from.
+    """
+    here = pathlib.Path(start or __file__).resolve()
+    for candidate in (here, *here.parents):
+        if (candidate / ".git").exists():
+            return str(candidate)
+    return None
+
+
+def _token(override: str | None = None) -> str:
+    """The GitHub token this host already exports, preferring an explicit one.
+
+    ``GH_TOKEN`` and ``MCP_GITHUB_TOKEN`` carry the same value here; reading them
+    here rather than inventing a variable keeps the verifier authenticating with
+    the credential every other GitHub call in the host already honours.
+    """
+    if override:
+        return override.strip()
+    for name in _TOKEN_ENVS:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _run(
+    command: Sequence[str],
+    cwd: str | None,
+    timeout_s: float,
+    env: Mapping[str, str] | None = None,
+) -> tuple[int, str]:
     completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
         list(command),
         cwd=cwd,
+        env=dict(env) if env is not None else None,
         capture_output=True,
         text=True,
         timeout=timeout_s,
@@ -405,12 +453,21 @@ class SubprocessVerifier:
     remote: str = "origin"
     cwd: str | None = None
     timeout_s: float = 20.0
+    token: str | None = None
     runner: Callable[[Sequence[str]], tuple[int, str]] | None = None
 
-    def _exec(self, command: Sequence[str]) -> tuple[int, str]:
+    def _exec(self, command: Sequence[str], env: Mapping[str, str] | None = None) -> tuple[int, str]:
         if self.runner is not None:
             return self.runner(command)
-        return _run(command, self.cwd, self.timeout_s)
+        return _run(command, self.cwd or _repo_root(), self.timeout_s, env)
+
+    def _gh(self, command: Sequence[str]) -> tuple[int, str]:
+        """Run gh with the host's own token, so a missing login is not a missing artifact."""
+        token = _token(self.token)
+        env: Mapping[str, str] | None = None
+        if token:
+            env = {**os.environ, GH_TOKEN_ENV: token, MCP_GITHUB_TOKEN_ENV: token}
+        return self._exec(command, env=env)
 
     def __call__(self, claim: Claim) -> Verdict:
         if claim.kind == KIND_BRANCH:
@@ -427,6 +484,15 @@ class SubprocessVerifier:
         )
 
     def _branch(self, claim: Claim) -> Verdict:
+        if claim.repo:
+            # Ask the forge about the repository the claim names, not whatever
+            # remote a local checkout happens to point at.
+            code, output = self._gh(["gh", "api", f"repos/{claim.repo}/branches/{claim.value}", "--jq", ".name"])
+            if code == 0:
+                return Verdict(claim.value, claim.kind, True, "")
+            if _forge_says_absent(output):
+                return Verdict(claim.value, claim.kind, False, f"branch {claim.value} is not on {claim.repo}")
+            return Verdict(claim.value, claim.kind, False, f"{COULD_NOT_CHECK}: gh api failed: {output.strip()}")
         code, output = self._exec(["git", "ls-remote", "--heads", self.remote, claim.value])
         if code != 0:
             return Verdict(claim.value, claim.kind, False, f"{COULD_NOT_CHECK}: git ls-remote failed: {output.strip()}")
@@ -438,7 +504,7 @@ class SubprocessVerifier:
         if not claim.repo:
             return Verdict(claim.value, claim.kind, False, f"PR {claim.value} names no repository; cannot be resolved")
         number = claim.value.rsplit("#", 1)[-1]
-        code, output = self._exec(["gh", "pr", "view", number, "--repo", claim.repo, "--json", "state,url"])
+        code, output = self._gh(["gh", "pr", "view", number, "--repo", claim.repo, "--json", "state,url"])
         if code != 0:
             if _forge_says_absent(output):
                 return Verdict(claim.value, claim.kind, False, f"PR {claim.value} is not on {claim.repo}")
@@ -463,7 +529,7 @@ class SubprocessVerifier:
         return Verdict(claim.value, claim.kind, False, f"commit {claim.value} is not a valid object: {output.strip()}")
 
     def _commit_via_forge(self, claim: Claim) -> Verdict:
-        code, output = self._exec(["gh", "api", f"repos/{claim.repo}/commits/{claim.value}", "--jq", ".sha"])
+        code, output = self._gh(["gh", "api", f"repos/{claim.repo}/commits/{claim.value}", "--jq", ".sha"])
         if code == 0:
             return Verdict(claim.value, claim.kind, True, "")
         if _forge_says_absent(output):
