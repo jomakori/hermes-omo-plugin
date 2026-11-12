@@ -70,6 +70,37 @@ SHUTDOWN_ERROR = "gateway shut down mid-run; verify its work on disk before re-d
 # The short cause the live status row shows for an interrupted worker; the long
 # error above stays on the record for the reader who needs the detail.
 INTERRUPTED_CAUSE = "gateway restart"
+# What a record left `RUNNING` by a process that is gone reads as: no session in
+# this process holds it any more, so it was never going to move on its own and it
+# held a dispatch slot until an operator noticed (#59). The tail is the restart
+# wording, because the reader's next move is the same either way.
+ORPHANED_ERROR = (
+    "orphaned record: no live session for this run{claims}; its work (and any branch or PR it produced) "
+    "is unverified — check the working tree before re-dispatching"
+)
+ORPHANED_CAUSE = "orphaned record"
+
+# The claim kinds worth naming back when the settled record already carries one.
+_CLAIM_KINDS = ("branch", "pr", "commit")
+
+
+def _claimed_note(worker: Worker) -> str:
+    """The branch/PR/commit already on the record, as a clause ("" when it names none)."""
+    verification = worker.verification if isinstance(worker.verification, dict) else {}
+    claims = [
+        f"{str(artifact.get('kind')).strip()} {str(artifact.get('claimed')).strip()}"
+        for artifact in verification.get("artifacts") or ()
+        if isinstance(artifact, dict)
+        and str(artifact.get("kind") or "").strip() in _CLAIM_KINDS
+        and str(artifact.get("claimed") or "").strip()
+    ]
+    return f" (claimed {', '.join(claims)})" if claims else ""
+
+
+def _orphaned_error(worker: Worker) -> str:
+    """Why a record still reading RUNNING is settled: no session holds it in this process."""
+    return ORPHANED_ERROR.format(claims=_claimed_note(worker))
+
 
 # A brief names its deliverables one per line: `ARTIFACT: <path>`. The host returns
 # a worker's result as text plus a duration — no tool names, no repository state —
@@ -301,31 +332,18 @@ class OmoEngine:
         return self._lifecycle
 
     def _restore(self) -> None:
-        """Adopt the record from disk, naming what no longer has a process behind it."""
+        """Adopt the record from disk, settling what no live session holds any more."""
         if self._restored or self._store is None:
             return
         self._restored = True
-        adopted = {run_id: run for run_id, run in self._store.load().items() if run_id not in self.runs}
+        loaded = self._store.load()
+        # Reconcile before adoption and before anything reads `self.runs`: `status`,
+        # the live status message and any later dispatch all answer from that dict,
+        # so a dead row must already read INTERRUPTED by the time they see it.
+        newly_interrupted = self._reconcile_orphans(loaded)
+        adopted = {run_id: run for run_id, run in loaded.items() if run_id not in self.runs}
         if not adopted:
             return
-        newly_interrupted: list[Worker] = []
-        for run in adopted.values():
-            for worker in run.workers:
-                if worker.status not in UNFINISHED:
-                    continue
-                worker.status = INTERRUPTED
-                worker.error = INTERRUPTED_ERROR
-                worker.crash_reason = crash_reason_for(worker.error)
-                worker.finished_at = worker.finished_at or time.time()
-                run.recovered = True
-                newly_interrupted.append(worker)
-                # Name the interruption on the live message too, so a restart that
-                # re-attaches to the same message renders ⚠️ rather than leaving a
-                # stuck 🔁 (best-effort: a host with no listener just drops it).
-                self._progress(
-                    "worker_interrupted",
-                    {**self._worker_event(run, worker), "cause": INTERRUPTED_CAUSE},
-                )
         self.runs.update(adopted)
         # Write the downgrade back: the record must not keep claiming a process that
         # is gone, and a second reader must not have to rediscover it.
@@ -336,6 +354,62 @@ class OmoEngine:
         # own new run, and that write must not race the adoption write above.
         for worker in newly_interrupted:
             self._maybe_dispatch_self_patch(worker)
+
+    def _reconcile_orphans(self, loaded: dict[str, Run]) -> list[Worker]:
+        """Settle the records this process is not executing, once, at start.
+
+        Issue #59: a row could still read RUNNING hours after the process executing
+        it was gone, so it went on booking a dispatch slot for work nobody was doing
+        and kept reading as live work to everyone who asked. Liveness is session
+        ownership and nothing else — a run this process still executes holds its
+        session (`orchestrator.session.hold_run`), and that hold lives in process
+        memory, so it cannot outlive its process the way a stored field does.
+        `last_activity_at` and a call count are not consulted: both are written by a
+        process that keeps writing them right up to its last breath, so a fresh one
+        proves nothing about whether anyone is still there.
+
+        Returns the settled workers, for the callers that do something with them.
+        """
+        settled: list[Worker] = []
+        for run_id, run in loaded.items():
+            if run_id in self.runs:
+                continue
+            if session.run_is_held(run_id) or session.session_is_held(run.session_id):
+                continue
+            for worker in run.workers:
+                if worker.status not in UNFINISHED:
+                    continue
+                # RUNNING is the case #59 reports: a process was executing this and
+                # wrote nothing since. With no session holding it, that process is
+                # gone, so the record says so instead of keeping the dispatch slot.
+                was_running = worker.status == RUNNING
+                worker.status = INTERRUPTED
+                worker.error = _orphaned_error(worker) if was_running else INTERRUPTED_ERROR
+                worker.crash_reason = crash_reason_for(worker.error)
+                worker.finished_at = worker.finished_at or time.time()
+                run.recovered = True
+                settled.append(worker)
+                # Name the interruption on the live message too, so a restart that
+                # re-attaches to the same message renders ⚠️ rather than leaving a
+                # stuck 🔁 (best-effort: a host with no listener just drops it).
+                self._progress(
+                    "worker_interrupted",
+                    {
+                        **self._worker_event(run, worker),
+                        "cause": ORPHANED_CAUSE if was_running else INTERRUPTED_CAUSE,
+                    },
+                )
+        return settled
+
+    @staticmethod
+    def _release_if_settled(run: Run) -> None:
+        """Drop a run's session hold once nothing in this process executes it.
+
+        A retry leaves a successor worker unfinished and that one keeps the session
+        live, so the hold is only dropped when the whole run is done.
+        """
+        if not any(worker.status in UNFINISHED for worker in run.workers):
+            session.release_run(run.run_id)
 
     def _persist(self) -> None:
         """Checkpoint the registry: a restart must find the work, not an empty list."""
@@ -498,6 +572,9 @@ class OmoEngine:
         # turn: the worker thread that reports progress has no ContextVars.
         session.apply_route(run, session.current_route())
         self.runs[run_id] = run
+        # This process is executing it, so its session counts as held until the last
+        # worker settles — the only liveness evidence reconciliation trusts (#59).
+        session.hold_run(run_id, run.session_id)
         self._persist()
 
         spec = AGENTS[name]
@@ -1517,6 +1594,7 @@ class OmoEngine:
         # orchestrator.retry_policy). Additive like the two hooks above: never
         # changes what this payload reports about `worker`.
         self._maybe_auto_retry(run, worker)
+        self._release_if_settled(run)
         payload: dict[str, Any] = {
             "run_id": run.run_id,
             "agent": AGENTS[worker.agent_name].display,
@@ -1692,6 +1770,7 @@ class OmoEngine:
                     pass
             worker.status = CANCELLED
             cancelled += 1
+        self._release_if_settled(run)
         self._persist()
         return {
             "run_id": run_id,
@@ -1720,4 +1799,7 @@ class OmoEngine:
                         self._service().cancel(worker.handle, reason="plugin unloaded")
                     except Exception:
                         pass
+        # Nothing here is executing any of it now, so no session it served stays held.
+        for run in list(self.runs.values()):
+            self._release_if_settled(run)
         self._persist()
