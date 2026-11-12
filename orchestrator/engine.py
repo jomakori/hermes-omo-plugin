@@ -1541,6 +1541,10 @@ class OmoEngine:
         return payload
 
     async def _run_worker(self, run: Run, worker: Worker, request: Any) -> None:
+        """One worker's walk, off the host's loop. The wake belongs to `_run_worker_walk`."""
+        await asyncio.to_thread(self._run_worker_sync, run, worker, request)
+
+    def _run_worker_sync(self, run: Run, worker: Worker, request: Any) -> None:
         if worker.cancel_requested:
             worker.status = CANCELLED
             worker.error = worker.error or "cancelled"
@@ -1548,26 +1552,92 @@ class OmoEngine:
             self._progress("worker_cancelled", self._worker_event(run, worker))
             self._persist()
             return
-        await asyncio.to_thread(self._run_sync, run, worker, request)
+        self._run_sync(run, worker, request)
         self._progress("worker_done", self._worker_event(run, worker))
 
     async def _run_worker_and_wake(self, run: Run, worker: Worker, request: Any) -> None:
         # The caller's turn ended when the run_id came back, so this wake is the only
-        # thing that re-opens it. In a `finally`, because a run that died is exactly
-        # the one the caller has to hear about.
+        # thing that re-opens it. Two seams: the thread that walks the worker wakes
+        # from where the walk actually ends, and this frame covers a walk that never
+        # got that far. Both defer until the run is settled, and ``Run.woken`` keeps
+        # the delivery to one.
         try:
-            await self._run_worker(run, worker, request)
+            await asyncio.to_thread(self._run_worker_walk, run, worker, request)
         finally:
-            self._wake_caller(run)
+            self._wake_when_settled(run)
+
+    def _run_worker_walk(self, run: Run, worker: Worker, request: Any) -> None:
+        """Walk one background worker on this thread, ending at the wake seam.
+
+        Awaiting a thread is cancellable, and the coroutine that launched this walk
+        can be cancelled — or dropped with the turn that spawned it — while the
+        worker keeps running here. A wake that lived only in that coroutine would
+        then fire with the worker still RUNNING; ``Run.woken`` being persisted, that
+        wrong notice would be the only one the caller ever got. So the wake rides the
+        walk, which is also what settles the run in the first place.
+        """
+        try:
+            self._run_worker_sync(run, worker, request)
+        finally:
+            self._settle_unfinished(run, "the walk ended before this worker settled")
+            self._wake_when_settled(run)
 
     async def _run_graph(self, graph: Any, run: Run) -> None:
         # The schedule is a long, blocking walk of a thread pool: keep it off the
         # host's loop, exactly like a single background worker.
         try:
-            await asyncio.to_thread(graph.execute, run)
+            await asyncio.to_thread(self._run_graph_walk, graph, run)
         finally:
-            self._wake_caller(run)
+            self._wake_when_settled(run)
         self._ctx.emit(f"{self._key()}:graph_done", {"run_id": run.run_id, **graph._payload(run)})
+
+    def _run_graph_walk(self, graph: Any, run: Run) -> None:
+        """Drive the schedule on this thread, waking when its last worker settles.
+
+        Same hazard as ``_run_worker_walk``: the frame awaiting this can go away
+        while the pool is still working, and a wake taken from it would report a
+        run whose workers are all still RUNNING. Here the wake waits for the walk
+        to drain, then fires once.
+        """
+        try:
+            graph.execute(run)
+        finally:
+            self._settle_unfinished(run, "the walk ended before this worker settled")
+            self._wake_when_settled(run)
+
+    def _unfinished(self, run: Run) -> list[Worker]:
+        """The run's workers that can still change state."""
+        return [worker for worker in run.workers if worker.status in UNFINISHED]
+
+    def _settle_unfinished(self, run: Run, reason: str) -> None:
+        """Give every still-live worker a terminal status, so the run can be reported.
+
+        Only a walk that ended without settling its worker leaves one behind. Left
+        RUNNING it would hold the wake forever, and the caller would never be told —
+        the failure being precisely what the caller has to hear about.
+        """
+        changed = False
+        for worker in self._unfinished(run):
+            worker.status = FAILED
+            worker.error = worker.error or reason
+            worker.crash_reason = crash_reason_for(worker.error)
+            worker.finished_at = worker.finished_at or time.time()
+            changed = True
+            self._progress("worker_failed", self._worker_event(run, worker))
+        if changed:
+            self._persist()
+
+    def _wake_when_settled(self, run: Run) -> None:
+        """Wake the caller once the run has nothing left running.
+
+        A background run reports ``RUNNING`` for however long the work takes, so the
+        wake cannot belong to the frame that launched it: it belongs to the last
+        worker to settle. Deferring is safe because every settling seam calls this
+        again, and ``Run.woken`` keeps the delivery to one notice.
+        """
+        if self._unfinished(run):
+            return
+        self._wake_caller(run)
 
     def _wake_caller(self, run: Run) -> None:
         """Hand a finished background run back to the conversation that dispatched it.
@@ -1582,6 +1652,11 @@ class OmoEngine:
         nothing else. A missed wake is worth an event, never a broken run.
         """
         if run.woken or not run.background or not run.session_key:
+            return
+        if self._unfinished(run):
+            # A run with a worker still RUNNING has not finished. Reporting it here
+            # would be the last thing the caller ever heard about it, so leave
+            # ``woken`` unset for the seam where the last worker settles.
             return
         inject = getattr(self._ctx, "inject_message", None)
         if not callable(inject):
@@ -1599,8 +1674,13 @@ class OmoEngine:
 
     def _wake_text(self, run: Run) -> str:
         """The notice a woken session reads: enough to act on without polling."""
-        settled = sum(1 for w in run.workers if w.status in (SUCCEEDED, FAILED, CANCELLED))
-        lines = [f"OMO run {run.run_id} finished — {settled}/{len(run.workers)} worker(s) settled."]
+        unfinished = self._unfinished(run)
+        settled = len(run.workers) - len(unfinished)
+        # Never "finished" over a run that still has a live worker: the headline
+        # would contradict the worker lines beneath it, and the caller would stop
+        # waiting for work that is still being done.
+        state = "still running" if unfinished else "finished"
+        lines = [f"OMO run {run.run_id} {state} — {settled}/{len(run.workers)} worker(s) settled."]
         for worker in run.workers:
             spec = AGENTS.get(worker.agent_name)
             label = worker.title or worker.task.strip().splitlines()[0][:60]
@@ -1693,6 +1773,9 @@ class OmoEngine:
             worker.status = CANCELLED
             cancelled += 1
         self._persist()
+        # Cancelling settles the run, so the caller hears about it here rather than
+        # waiting on a walk that may never report again (a restart, a dead pool).
+        self._wake_when_settled(run)
         return {
             "run_id": run_id,
             "cancelled": cancelled,
