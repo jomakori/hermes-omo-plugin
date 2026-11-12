@@ -1,0 +1,98 @@
+/* OMO dashboard plugin styles — dark-theme friendly via CSS variables. */
+
+.omo-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  color: var(--foreground, #e4e4e7);
+}
+
+.omo-run-card {
+  background: var(--card, #18181b);
+  border: 1px solid var(--border, #27272a);
+  border-radius: var(--radius, 8px);
+  padding: 0.75rem 1rem;
+}
+
+.omo-run-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.omo-run-goal {
+  font-weight: 600;
+  color: var(--foreground, #e4e4e7);
+}
+
+.omo-run-meta {
+  font-size: 0.75rem;
+  color: var(--muted-foreground, #a1a1aa);
+}
+
+.omo-workers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+}
+
+.omo-worker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  padding: 0.125rem 0;
+}
+
+.omo-worker-agent {
+  font-weight: 500;
+}
+
+.omo-worker-status {
+  text-transform: uppercase;
+  font-size: 0.625rem;
+  letter-spacing: 0.03em;
+  color: var(--muted-foreground, #a1a1aa);
+}
+
+.omo-worker-tool {
+  color: var(--muted-foreground, #a1a1aa);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+}
+
+.omo-transcript {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.8125rem;
+  background: var(--card, #18181b);
+  border: 1px solid var(--border, #27272a);
+  border-radius: var(--radius, 8px);
+  padding: 0.75rem;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+.omo-transcript-line {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.omo-transcript-ts {
+  color: var(--muted-foreground, #71717a);
+  flex-shrink: 0;
+}
+
+.omo-badge-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--destructive-foreground, #fff);
+  background: var(--destructive, #dc2626);
+  border-radius: 999px;
+  padding: 0.0625rem 0.5rem;
+}
