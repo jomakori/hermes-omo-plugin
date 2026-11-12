@@ -98,16 +98,16 @@ def test_no_status_at_all_classifies_as_transport():
 
 def test_probe_once_reports_alive_from_a_200_response():
     transport = ScriptedTransport([ProbeResponse(status=200, message="pong")])
-    verdict = probe_once("copilot-luna", transport)
+    verdict = probe_once("deepseek-v4-flash-go", transport)
     assert verdict.alive is True
     assert verdict.reason == REASON_ALIVE
-    assert verdict.model == "copilot-luna"
+    assert verdict.model == "deepseek-v4-flash-go"
     assert verdict.status == 200
 
 
 def test_probe_once_reports_dead_quota_from_a_402_response():
     transport = ScriptedTransport([ProbeResponse(status=402, message="quota_exceeded")])
-    verdict = probe_once("copilot-luna", transport)
+    verdict = probe_once("deepseek-v4-flash-go", transport)
     assert verdict.alive is False
     assert verdict.reason == REASON_QUOTA
     assert verdict.status == 402
@@ -125,7 +125,7 @@ def test_a_raised_transport_exception_classifies_as_transport_not_dead_quota():
     # A connection error must not be mistaken for a provider's own quota verdict:
     # nobody was reached, so nothing was learned about billing or rate limits.
     transport = ScriptedTransport([ConnectionError("connection refused")])
-    verdict = probe_once("copilot-luna", transport)
+    verdict = probe_once("deepseek-v4-flash-go", transport)
     assert verdict.alive is False
     assert verdict.reason == REASON_TRANSPORT
     assert "connection refused" in verdict.message
@@ -140,13 +140,13 @@ def test_the_cache_probes_once_then_serves_the_cached_verdict():
     clock = FakeClock()
     cache = HealthProbeCache(transport=transport, ttl_seconds=60.0, _clock=clock)
 
-    first = cache.verdict("copilot-luna")
+    first = cache.verdict("deepseek-v4-flash-go")
     clock.advance(5.0)
-    second = cache.verdict("copilot-luna")
+    second = cache.verdict("deepseek-v4-flash-go")
 
     assert first.alive is True
     assert second is first  # served from cache, not re-probed
-    assert transport.calls == ["copilot-luna"]  # only one real probe happened
+    assert transport.calls == ["deepseek-v4-flash-go"]  # only one real probe happened
 
 
 def test_the_cache_reprobes_once_the_ttl_expires():
@@ -159,13 +159,13 @@ def test_the_cache_reprobes_once_the_ttl_expires():
     clock = FakeClock()
     cache = HealthProbeCache(transport=transport, ttl_seconds=10.0, _clock=clock)
 
-    first = cache.verdict("copilot-luna")
+    first = cache.verdict("deepseek-v4-flash-go")
     clock.advance(11.0)  # past the TTL
-    second = cache.verdict("copilot-luna")
+    second = cache.verdict("deepseek-v4-flash-go")
 
     assert first.reason == REASON_ALIVE
     assert second.reason == REASON_QUOTA
-    assert transport.calls == ["copilot-luna", "copilot-luna"]
+    assert transport.calls == ["deepseek-v4-flash-go", "deepseek-v4-flash-go"]
 
 
 def test_force_bypasses_a_fresh_cache_entry():
@@ -185,12 +185,12 @@ def test_cached_verdict_never_probes_and_is_none_before_any_probe():
     clock = FakeClock()
     cache = HealthProbeCache(transport=transport, ttl_seconds=60.0, _clock=clock)
 
-    assert cache.cached_verdict("copilot-luna") is None
+    assert cache.cached_verdict("deepseek-v4-flash-go") is None
     assert transport.calls == []  # the passive read never triggered a probe
 
-    cache.verdict("copilot-luna")
-    assert cache.cached_verdict("copilot-luna").alive is True
-    assert transport.calls == ["copilot-luna"]  # still just the one active probe
+    cache.verdict("deepseek-v4-flash-go")
+    assert cache.cached_verdict("deepseek-v4-flash-go").alive is True
+    assert transport.calls == ["deepseek-v4-flash-go"]  # still just the one active probe
 
 
 def test_cached_verdict_goes_stale_after_the_ttl_without_reprobing():
@@ -198,11 +198,11 @@ def test_cached_verdict_goes_stale_after_the_ttl_without_reprobing():
     clock = FakeClock()
     cache = HealthProbeCache(transport=transport, ttl_seconds=10.0, _clock=clock)
 
-    cache.verdict("copilot-luna")
+    cache.verdict("deepseek-v4-flash-go")
     clock.advance(11.0)
 
-    assert cache.cached_verdict("copilot-luna") is None  # stale, not served
-    assert transport.calls == ["copilot-luna"]  # the passive read still never probed
+    assert cache.cached_verdict("deepseek-v4-flash-go") is None  # stale, not served
+    assert transport.calls == ["deepseek-v4-flash-go"]  # the passive read still never probed
 
 
 def test_invalidate_drops_one_model_or_everything():
@@ -223,7 +223,7 @@ def test_invalidate_drops_one_model_or_everything():
 def test_is_alive_is_a_thin_read_of_verdict_alive():
     transport = ScriptedTransport([ProbeResponse(status=402)])
     cache = HealthProbeCache(transport=transport, ttl_seconds=60.0)
-    assert cache.is_alive("copilot-luna") is False
+    assert cache.is_alive("deepseek-v4-flash-go") is False
 
 
 # ── alive_candidates(): what chain construction consults ───────────────────
@@ -232,9 +232,9 @@ def test_is_alive_is_a_thin_read_of_verdict_alive():
 def test_alive_candidates_drops_a_model_probed_dead():
     transport = ScriptedTransport([ProbeResponse(status=402, message="quota_exceeded")])
     cache = HealthProbeCache(transport=transport, ttl_seconds=60.0)
-    cache.verdict("copilot-luna")  # force the dead verdict into the cache
+    cache.verdict("deepseek-v4-flash-go")  # force the dead verdict into the cache
 
-    chain = ("copilot-luna", "claude-sonnet-5", "deepseek-v4-flash-direct")
+    chain = ("deepseek-v4-flash-go", "claude-sonnet-5", "deepseek-v4-flash-direct")
     assert alive_candidates(chain, cache) == ("claude-sonnet-5", "deepseek-v4-flash-direct")
 
 
@@ -249,9 +249,9 @@ def test_alive_candidates_keeps_an_unprobed_model():
 def test_alive_candidates_keeps_a_model_probed_alive():
     transport = ScriptedTransport([ProbeResponse(status=200)])
     cache = HealthProbeCache(transport=transport, ttl_seconds=60.0)
-    cache.verdict("copilot-luna")
+    cache.verdict("deepseek-v4-flash-go")
 
-    chain = ("copilot-luna", "claude-sonnet-5")
+    chain = ("deepseek-v4-flash-go", "claude-sonnet-5")
     assert alive_candidates(chain, cache) == chain
 
 
@@ -259,9 +259,9 @@ def test_alive_candidates_reinstates_a_model_once_its_dead_verdict_goes_stale():
     transport = ScriptedTransport([ProbeResponse(status=402)])
     clock = FakeClock()
     cache = HealthProbeCache(transport=transport, ttl_seconds=10.0, _clock=clock)
-    cache.verdict("copilot-luna")
+    cache.verdict("deepseek-v4-flash-go")
 
-    chain = ("copilot-luna", "claude-sonnet-5")
+    chain = ("deepseek-v4-flash-go", "claude-sonnet-5")
     assert alive_candidates(chain, cache) == ("claude-sonnet-5",)
 
     clock.advance(11.0)  # the dead verdict is now stale, so it reads as unprobed

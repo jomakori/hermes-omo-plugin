@@ -25,7 +25,7 @@ from orchestrator.chains import (
 # A three-element chain so OMR-7bdff246 (the full-trail render) has a real walk to
 # exercise end to end, not just the two-hop billing/quota cases above.
 THREE_HOP_CHAIN = {
-    "chains": {"explore": ["claude-opus-5", "copilot-sonnet-5.5", "deepseek-v4-flash-direct"]},
+    "chains": {"explore": ["claude-opus-5", "deepseek-v4-flash-go", "deepseek-v4-flash-direct"]},
     "runtime_fallback": {"retry_on_errors": [402, 429, 500]},
 }
 
@@ -195,17 +195,17 @@ def test_a_three_hop_walk_renders_all_three_in_order_with_reasons():
     _, engine = make_engine(lifecycle, THREE_HOP_CHAIN)
     out = engine.dispatch(goal="scan the repo", target="explore")
 
-    assert lifecycle.launched == ["claude-opus-5", "copilot-sonnet-5.5", "deepseek-v4-flash-direct"]
+    assert lifecycle.launched == ["claude-opus-5", "deepseek-v4-flash-go", "deepseek-v4-flash-direct"]
     assert out["status"] == "succeeded"
     assert out["model"] == "deepseek-v4-flash-direct"
     assert out["hop_history"] == [
         {"model": "claude-opus-5", "reason": HOP_REASON_RATE_LIMIT},
-        {"model": "copilot-sonnet-5.5", "reason": HOP_REASON_PROVIDER_UNUSABLE},
+        {"model": "deepseek-v4-flash-go", "reason": HOP_REASON_PROVIDER_UNUSABLE},
         {"model": "deepseek-v4-flash-direct", "reason": HOP_REASON_SUCCESS},
     ]
     # The full trail renders every hop, in order, naming which one served.
     assert render_hop_trail(out["hop_history"]) == (
-        "claude-opus-5 (rate limit) → copilot-sonnet-5.5 (provider unusable) → deepseek-v4-flash-direct (served)"
+        "claude-opus-5 (rate limit) → deepseek-v4-flash-go (provider unusable) → deepseek-v4-flash-direct (served)"
     )
 
 

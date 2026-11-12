@@ -101,8 +101,8 @@ def test_dispatch_falls_back_on_retryable_error():
     ctx, engine = make_engine(lifecycle)
     out = engine.dispatch(goal="scan the repo", target="explore")
     assert out["status"] == "succeeded"
-    assert lifecycle.launches == ["deepseek-v4-flash-direct", "copilot-luna"]
-    assert out["model"] == "copilot-luna"
+    assert lifecycle.launches == ["deepseek-v4-flash-direct", "deepseek-v4-flash-go"]
+    assert out["model"] == "deepseek-v4-flash-go"
 
 
 def test_dispatch_exhausts_chain_then_fails():
