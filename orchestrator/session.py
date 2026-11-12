@@ -14,6 +14,7 @@ every failure resolves to "no session" and nothing raises.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 SESSION_ID_ENV = "HERMES_SESSION_ID"
@@ -21,6 +22,43 @@ SESSION_KEY_ENV = "HERMES_SESSION_KEY"
 ROUTE_PLATFORM_ENV = "HERMES_SESSION_PLATFORM"
 ROUTE_CHAT_ENV = "HERMES_SESSION_CHAT_ID"
 ROUTE_THREAD_ENV = "HERMES_SESSION_THREAD_ID"
+
+# The runs this process is executing right now, by run id, holding their session
+# live. Deliberately process memory and never a field on the record: a hold exists
+# only while an engine is here to release it, so it dies with the process. A stored
+# liveness field survives the process and keeps claiming a dead run is alive, which
+# is exactly how a record sat at RUNNING for hours holding a dispatch slot (#59).
+_HELD_RUNS: dict[str, str] = {}
+_HELD_LOCK = threading.Lock()
+
+
+def hold_run(run_id: str, session_id: str | None) -> None:
+    """Mark a run this process is executing, so it and its session count as live."""
+    if not run_id:
+        return
+    with _HELD_LOCK:
+        _HELD_RUNS[run_id] = (session_id or "").strip()
+
+
+def release_run(run_id: str) -> None:
+    """Drop a run's hold — idempotent, so every terminal path can call it."""
+    with _HELD_LOCK:
+        _HELD_RUNS.pop(run_id, None)
+
+
+def run_is_held(run_id: str) -> bool:
+    """Whether this process is executing that run right now."""
+    with _HELD_LOCK:
+        return run_id in _HELD_RUNS
+
+
+def session_is_held(session_id: str | None) -> bool:
+    """Whether a run this process is still executing belongs to `session_id`."""
+    key = (session_id or "").strip()
+    if not key:
+        return False
+    with _HELD_LOCK:
+        return key in _HELD_RUNS.values()
 
 
 def current_session_id() -> str | None:
@@ -125,4 +163,8 @@ __all__ = [
     "current_route",
     "current_session_id",
     "foreign_run",
+    "hold_run",
+    "release_run",
+    "run_is_held",
+    "session_is_held",
 ]

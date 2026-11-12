@@ -375,6 +375,45 @@ its reason), the chain `hop` it fell back to (empty on success), and the
 `activity_session` its tool call is read from. `run_created` carries the `review`
 flag the renderer obeys.
 
+## Live transcripts and the OMO Runs dashboard
+
+Two read-only surfaces sit beside the run registry; neither writes anything,
+and neither can fail a run.
+
+**Per-run JSONL.** Every run appends to `~/.omo/live/<run_id>.jsonl` while it
+runs — one JSON object per line, `{seq, ts, agent, task_id, kind, text}`, with
+`kind` one of `launch` / `status` / `tool` / `result` / `error` — so it can be
+tailed while the run is still live:
+
+```bash
+tail -f ~/.omo/live/omo_304bf8e5.jsonl
+```
+
+The dispatch result (and `omo action=status`) names that file: `live_transcripts`
+maps each worker's `task_id` — or its roster name when there is none — to the
+run's path, and `live_transcript_hint` is that path as one line to follow.
+`status` adds `transcript_lines` for runs that have a transcript. Text is
+redacted and capped at 500 characters, files older than seven days are pruned,
+and a transcript that cannot be written leaves the run unaffected. Format,
+kinds, readers (`read_since`, `tail_text`) and retention are in
+[`docs/live-transcript.md`](docs/live-transcript.md).
+
+**The OMO Runs tab.** The plugin's `dashboard/` half registers a web-UI tab —
+`/omo`, labelled `OMO Runs` in `dashboard/manifest.json` — over the read-only
+API in `dashboard/plugin_api.py`, mounted at `/api/plugins/omo/`. It reads
+`~/.omo/live` and `~/.omo/runs.json` and writes neither. Left: the registry,
+newest first, one row `<title or goal> · <state> · <age> · N workers`, badged
+`LIVE` while a worker is unfinished. Right: the selected run's worker roster
+(`agent`, `status`, `last tool · last activity`) above a live feed of its
+transcript, `<HH:MM:SS> <agent> · <kind>: <text>` — tool lines dimmed, `result`
+green, `error` red. The run list polls every 5s, the feed every 1.5s with
+`?since=<next_since>&limit=200` and no requests while the tab is hidden, and the
+feed stops polling as soon as the run goes inactive. A reader who has scrolled
+up is not dragged back to the bottom.
+
+The tab reads the default live dir, so overriding `live_transcript_dir` moves
+the writer without moving the tab.
+
 ## Task graphs
 
 Work with dependencies goes in one call instead of a sequence of dispatches:
