@@ -79,13 +79,13 @@
       h(
         "div",
         { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" } },
-        h("span", {}, run.title || run.run_id),
+        h("span", {}, run.goal || run.title || run.run_id),
         run.active ? h("span", { className: "omo-badge-live" }, "LIVE") : null
       ),
       h(
         "div",
         { style: { fontSize: "0.85em", opacity: 0.75 } },
-        (run.status || "unknown") + " · " + timeAgo(run.updated_at || run.created_at) + " · " + workerCount + " worker" + (workerCount === 1 ? "" : "s")
+        (run.state || run.status || "unknown") + " · " + timeAgo(run.updated_at || run.created_at) + " · " + workerCount + " worker" + (workerCount === 1 ? "" : "s")
       )
     );
   }
