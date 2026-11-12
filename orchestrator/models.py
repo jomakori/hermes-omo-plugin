@@ -374,6 +374,11 @@ class Run:
     # Whether engine._wake_caller has already fired for this run. Persisted so a
     # restart that re-adopts an already-woken run from disk never wakes it twice.
     woken: bool = False
+    # Where this run's live JSONL transcript lives (see
+    # orchestrator.live_transcript), or None when no transcript could be
+    # created — every reader of this field must treat None as "no transcript
+    # for this run" rather than an error.
+    transcript_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -390,6 +395,7 @@ class Run:
             "status_message_id": self.status_message_id,
             "status_pinned_id": self.status_pinned_id,
             "woken": self.woken,
+            "transcript_path": self.transcript_path,
             "workers": [worker.to_dict() for worker in self.workers],
         }
 
@@ -420,6 +426,7 @@ class Run:
             status_message_id=as_optional_str(payload.get("status_message_id")),
             status_pinned_id=as_optional_str(payload.get("status_pinned_id")),
             woken=bool(payload.get("woken")),
+            transcript_path=as_optional_str(payload.get("transcript_path")),
         )
 
     def tree(self) -> str:

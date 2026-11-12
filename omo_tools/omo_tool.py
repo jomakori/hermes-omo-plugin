@@ -132,6 +132,40 @@ def render(payload: Any) -> str:
     return json.dumps(payload, indent=2, default=str)
 
 
+def _append_transcript_line(lines: list[str], label: Any, path: Any) -> None:
+    """Append one `transcript: <path>` line, labelled by its run/worker when known."""
+    if not path:
+        return
+    lines.append(f"{label} transcript: {path}" if label else f"transcript: {path}")
+
+
+def _transcript_lines(payload: Any) -> list[str]:
+    """`transcript: <path>` lines for a status payload, one per run and per worker row.
+
+    Only built when the field is present: a run with no live transcript (an
+    unusable live dir) adds no line and the status output reads exactly as it
+    did before transcripts existed.
+    """
+    if not isinstance(payload, dict):
+        return []
+    lines: list[str] = []
+    _append_transcript_line(lines, None, payload.get("transcript_path"))
+    for row in payload.get("workers") or ():
+        if isinstance(row, dict):
+            _append_transcript_line(lines, row.get("task_id") or row.get("agent"), row.get("transcript_path"))
+    for entry in payload.get("runs") or ():
+        if isinstance(entry, dict):
+            _append_transcript_line(lines, entry.get("run_id"), entry.get("transcript_path"))
+    return lines
+
+
+def _render_status(payload: Any) -> str:
+    """The status action's output: the JSON payload, then its transcript lines if any."""
+    rendered = render(payload)
+    lines = _transcript_lines(payload)
+    return f"{rendered}\n" + "\n".join(lines) if lines else rendered
+
+
 def make_omo_handler(engine: Any) -> Callable[..., Any]:
     async def handler(args: dict[str, Any] | None = None, **_kwargs: Any) -> str:
         params = args or {}
@@ -196,7 +230,9 @@ def make_omo_handler(engine: Any) -> Callable[..., Any]:
                 )
             )
         if action == "status":
-            return render(engine.status(params.get("run_id"), all_sessions=bool(params.get("all_sessions", False))))
+            return _render_status(
+                engine.status(params.get("run_id"), all_sessions=bool(params.get("all_sessions", False)))
+            )
         if action == "tree":
             run_id = str(params.get("run_id") or "").strip()
             if not run_id:

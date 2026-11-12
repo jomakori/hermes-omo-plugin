@@ -1,0 +1,14 @@
+{
+  "name": "omo",
+  "label": "OMO Runs",
+  "description": "Live OMO multi-agent runs - worker status and streaming transcript",
+  "icon": "Bot",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/omo",
+    "position": "end"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

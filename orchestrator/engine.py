@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from orchestrator import session
+from orchestrator import live_transcript, session
 from orchestrator.artifact_verify import COULD_NOT_CHECK, default_verifier, verification_for
 from orchestrator.boundary import claim_boundary
 from orchestrator.chains import (
@@ -109,6 +109,65 @@ _TASK_CONTEXT_CLOSE = "\n</task_context>"
 # a thirty-minute worker would otherwise post ninety status edits to say "nothing yet".
 _HEARTBEAT_INTERVAL_SECONDS = 60.0
 
+# The one-line nudge a dispatch payload carries when its run has a live
+# transcript (see orchestrator.live_transcript): named once so every payload
+# that adds it says the same thing.
+_LIVE_HINT = "Tail the path(s) in live_transcripts to watch this run as it happens."
+
+
+def _live_transcripts_payload(run: Run) -> dict[str, str]:
+    """{task_id or agent -> transcript path} for every worker in `run`, or {}.
+
+    One run has one transcript file; every worker in it maps to the same
+    path, keyed by whatever a caller would use to find that worker again
+    (its task_id for a graph, its agent name for a plain dispatch). Empty
+    when the run has no transcript (``for_run`` returned None at open time).
+    """
+    if not run.transcript_path:
+        return {}
+    return {(worker.task_id or worker.agent_name): run.transcript_path for worker in run.workers}
+
+
+def _live_payload_fields(run: Run) -> dict[str, Any]:
+    """The `live_transcripts`/`live_hint` pair a dispatch payload adds, or just the former, empty.
+
+    `live_transcripts` is always added (an empty dict costs nothing and lets a
+    caller check it without a KeyError); `live_hint` is added only when there is
+    something to tail, so a run with no transcript reads exactly as it did
+    before this field existed.
+    """
+    transcripts = _live_transcripts_payload(run)
+    fields: dict[str, Any] = {"live_transcripts": transcripts}
+    if transcripts:
+        fields["live_hint"] = _LIVE_HINT
+    return fields
+
+
+def _status_run_row(run: Run) -> dict[str, Any]:
+    """One `status` entry per run ({run_id, tree}), plus its transcript path when it has one.
+
+    Omitted rather than set to None, so a run without a transcript renders exactly
+    as it did before the field existed.
+    """
+    row: dict[str, Any] = {"run_id": run.run_id, "tree": run.tree()}
+    if run.transcript_path:
+        row["transcript_path"] = run.transcript_path
+    return row
+
+
+def _status_rows(run: Run) -> list[dict[str, Any]]:
+    """Worker rows for `status`, each naming the run's transcript path when it has one.
+
+    One run has one transcript file (see ``orchestrator.live_transcript``), so the
+    path is the same on every row; repeating it per row is what lets a reader of
+    a single worker line know where to tail.
+    """
+    rows = [worker.as_row() for worker in run.workers]
+    if run.transcript_path:
+        for row in rows:
+            row["transcript_path"] = run.transcript_path
+    return rows
+
 
 class WatchdogStop(RuntimeError):
     """A child the watchdog stopped, so the caller fails the hop instead of waiting."""
@@ -171,6 +230,18 @@ class OmoEngine:
         # The live status notifier, attached by the plugin entry point. Optional:
         # every progress emit is a no-op without it.
         self._status: Any = None
+        # The live transcript writer per run (orchestrator.live_transcript), keyed
+        # by run_id. A cached ``None`` is a valid value -- a run whose writer could
+        # not be built -- so every lookup below checks membership rather than
+        # treating a missing writer as "not yet built".
+        self._transcripts: dict[str, Any] = {}
+        # The newest (tool, target) pair already written to a worker's transcript,
+        # so the watchdog's existing slice loop writes a "tool" line only when it
+        # changes, not once per slice.
+        self._last_activity: dict[str, tuple[str, str]] = {}
+        # The status last written per worker, so a heartbeat repeat of a status
+        # already announced (same worker, same RUNNING) is not written again.
+        self._last_status: dict[str, str] = {}
         # Adopt the record now, so the first caller after a restart is answered from
         # it rather than from an empty registry.
         self._restore()
@@ -364,6 +435,7 @@ class OmoEngine:
                 "status": "running",
                 "tree": run.tree(),
                 "claim_boundary": claim_boundary(),
+                **_live_payload_fields(run),
             }
         graph.execute(run)
         return graph._payload(run)
@@ -396,6 +468,7 @@ class OmoEngine:
             session_key=session.current_session_key(),
             background=background,
         )
+        self._open_transcript(run, title=title)
         worker = Worker(
             run_id=run_id,
             agent_name=name,
@@ -444,6 +517,7 @@ class OmoEngine:
                 "model": worker.model,
                 "tree": run.tree(),
                 "claim_boundary": claim_boundary(),
+                **_live_payload_fields(run),
             }
 
         return self._run_sync(run, worker, request)
@@ -603,6 +677,115 @@ class OmoEngine:
         """Attach the live status notifier; every progress emit drives it."""
         self._status = notifier
 
+    # ── live transcript ───────────────────────────────────────────────
+    def _open_transcript(self, run: Run, *, title: str | None = None) -> None:
+        """Build `run`'s live transcript writer once; cache even a failed build.
+
+        ``live_transcript.for_run`` returning ``None`` (an unusable live dir)
+        is itself cached under ``run.run_id`` so every later write site can
+        check membership rather than re-attempting construction on every
+        event. ``run.transcript_path`` is left unset in that case — the
+        field's own contract (see ``orchestrator.models.Run.transcript_path``)
+        is that ``None`` there means no transcript for this run.
+        """
+        if run.run_id in self._transcripts:
+            return
+        try:
+            writer = live_transcript.for_run(run.run_id, title=title, goal=run.goal)
+        except Exception:  # noqa: BLE001 - a transcript must never block a dispatch
+            writer = None
+        self._transcripts[run.run_id] = writer
+        if writer is not None:
+            run.transcript_path = str(writer.path)
+
+    def _write_transcript(
+        self, run_id: str, *, agent: str = "", task_id: str | None = None, kind: str = "status", text: str = ""
+    ) -> None:
+        """Append one line to `run_id`'s transcript; a total no-op without one.
+
+        The single call site every seam below goes through. ``LiveTranscript.write``
+        itself never raises (see its own docstring), so there is nothing to guard
+        here beyond the membership check that makes a missing writer inert.
+        """
+        writer = self._transcripts.get(run_id)
+        if writer is None:
+            return
+        writer.write({"agent": agent, "task_id": task_id, "kind": kind, "text": text})
+
+    def _emit_transcript_status(self, payload: dict[str, Any]) -> None:
+        """Mirror a status-tracker emit onto its run's transcript, e.g. ``t2 -> RUNNING``.
+
+        Driven from ``_progress`` — the engine's one existing seam for every
+        status transition — so no new call sites are needed at each of the
+        many places that already call it. Silently does nothing for an event
+        payload that names no run or no status (e.g. ``jev_route``).
+        """
+        run_id = payload.get("run_id")
+        status = payload.get("status")
+        if not run_id or not status:
+            return
+        label = payload.get("task_id") or payload.get("agent") or ""
+        text = f"{label} -> {str(status).upper()}".strip()
+        # Per worker, not per run: a graph's workers change status independently.
+        cache_key = f"{run_id}:{label}"
+        if self._last_status.get(cache_key) == text:
+            return
+        self._last_status[cache_key] = text
+        self._write_transcript(
+            str(run_id),
+            agent=str(payload.get("agent") or ""),
+            task_id=payload.get("task_id") or None,
+            kind="status",
+            text=text,
+        )
+
+    def _emit_activity_transcript(self, worker: Worker, profiles: Any) -> None:
+        """Write the worker's live tool call, e.g. ``read_file x.py``, when it changes.
+
+        Reuses the same session read the watchdog's ``_activity_at`` already
+        performs each slice; ``_last_activity`` keeps this a one-line write per
+        change rather than once per slice.
+        """
+        if self._transcripts.get(worker.run_id) is None:
+            return
+        try:
+            from orchestrator import worker_activity  # noqa: PLC0415 - optional
+
+            pair = worker_activity.read_activity(worker.agent_name, worker.activity_session or "", profiles)
+        except Exception:
+            return
+        if pair is None:
+            return
+        cache_key = f"{worker.run_id}:{worker.task_id or worker.agent_name}"
+        if self._last_activity.get(cache_key) == pair:
+            return
+        self._last_activity[cache_key] = pair
+        tool, target = pair
+        self._write_transcript(
+            worker.run_id,
+            agent=worker.agent_name,
+            task_id=worker.task_id or None,
+            kind="tool",
+            text=f"{tool} {target}".strip(),
+        )
+
+    def _emit_completion_transcript(self, run: Run, worker: Worker) -> None:
+        """Write a finished worker's outcome: ``result`` on success, ``error`` otherwise.
+
+        Called once from ``_outcome`` — the single funnel every terminal
+        worker transition already passes through — rather than at each of the
+        several return sites that reach a terminal state.
+        """
+        if worker.status == SUCCEEDED:
+            text = str(_result_field(worker.result, "summary") or "").strip() or "succeeded"
+            kind = "result"
+        else:
+            text = worker.error or str(worker.status)
+            kind = "error"
+        self._write_transcript(
+            run.run_id, agent=worker.agent_name, task_id=worker.task_id or None, kind=kind, text=text
+        )
+
     def _worker_event(self, run: Run, worker: Worker) -> dict[str, Any]:
         """The payload every worker progress event carries.
 
@@ -684,6 +867,7 @@ class OmoEngine:
                 notifier.handle(event, payload)
             except Exception:
                 pass
+        self._emit_transcript_status(payload)
 
     def run_route(self, run_id: str) -> dict[str, Any] | None:
         """Where to deliver a run's status message, or None when unknown."""
@@ -774,6 +958,13 @@ class OmoEngine:
                 handle = service.launch(request)
                 worker.handle = handle
                 self._capture_activity_session(worker)
+                self._write_transcript(
+                    run.run_id,
+                    agent=worker.agent_name,
+                    task_id=worker.task_id or None,
+                    kind="launch",
+                    text=f"{worker.model or ''} {worker.title or worker.task.strip().splitlines()[0][:60]}".strip(),
+                )
                 if worker.cancel_requested:
                     try:
                         service.cancel(handle, reason="cancelled before start")
@@ -1098,6 +1289,7 @@ class OmoEngine:
                 saw_activity = True
                 last_activity = max(last_activity, activity)
                 worker.last_activity_at = activity
+                self._emit_activity_transcript(worker, self._config("activity_profiles_dir", None))
             idle = max(0.0, time.time() - last_activity)
             if saw_activity and stall > 0 and idle >= stall:
                 return None, (f"watchdog stopped it: no activity for {int(idle)}s (worker_stall_seconds={int(stall)})")
@@ -1314,6 +1506,7 @@ class OmoEngine:
         # A SUCCEEDED claim the check just ran and backed with nothing demotes here,
         # before anything downstream reads worker.status as the terminal verdict.
         worker.status = demote_unauthenticated(worker.status, worker.verification)
+        self._emit_completion_transcript(run, worker)
         self._record_outcome(worker, delivered=worker.status == SUCCEEDED)
         self._persist()
         # Additive side effect only: does not change what this payload reports
@@ -1339,6 +1532,7 @@ class OmoEngine:
             "client_gone": client_disconnected(worker.error),
             "tree": run.tree(),
             "claim_boundary": claim_boundary(),
+            **_live_payload_fields(run),
         }
         if worker.verification:
             # The caller that dispatched synchronously reads this payload and never
@@ -1448,16 +1642,17 @@ class OmoEngine:
                 "run_id": run_id,
                 "session_id": run.session_id,
                 "tree": run.tree(),
-                "workers": [w.as_row() for w in run.workers],
+                "workers": _status_rows(run),
                 "claim_boundary": claim_boundary(),
                 # Retrievable here rather than only printed, so the calling
                 # orchestrator persona can see a bounded-retry exhaustion and
                 # re-dispatch with a plan change instead of a blind retry.
                 "escalations": self.pending_escalations(run_id),
+                **({"transcript_path": run.transcript_path} if run.transcript_path else {}),
             }
         visible = [run for run in self.runs.values() if all_sessions or session.belongs_to(run, caller)]
         payload: dict[str, Any] = {
-            "runs": [{"run_id": r.run_id, "tree": r.tree()} for r in visible],
+            "runs": [_status_run_row(r) for r in visible],
             "session_id": caller,
             "scope": "all_sessions" if all_sessions else "session",
             "claim_boundary": claim_boundary(),

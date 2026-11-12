@@ -18,7 +18,7 @@ from uuid import uuid4
 from orchestrator import session
 from orchestrator.boundary import claim_boundary
 from orchestrator.chains import render_hop_trail
-from orchestrator.engine import _clip, _result_field
+from orchestrator.engine import _clip, _live_payload_fields, _result_field
 from orchestrator.guards import GuardError
 from orchestrator.models import (
     BLOCKED,
@@ -203,6 +203,7 @@ class TaskGraph:
         # resolved here rather than inside a worker thread (ContextVars would not
         # carry it there, and the whole graph belongs to the one session anyway).
         run = Run(run_id=f"omo_{uuid4().hex[:8]}", goal=self.goal, session_id=session.current_session_id())
+        engine._open_transcript(run, title=self.goal)
         for task in self.tasks:
             name, chain = engine._resolve_target(target=task["agent"], category=task["category"], parent_agent=None)
             chain = tuple(engine._normalize_model(model) or model for model in chain)
@@ -493,4 +494,8 @@ class TaskGraph:
                 if w.task_id and not w.task_id.endswith(":review")
             ],
             "claim_boundary": claim_boundary(),
+            # Same live fields a plain dispatch payload carries: the run has one
+            # transcript (opened by the engine when the graph was built), and the
+            # caller of a synchronous graph reads this payload, not the record.
+            **_live_payload_fields(run),
         }
