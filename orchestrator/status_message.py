@@ -29,7 +29,7 @@ of the goal::
                 "phases": [
                     {"name": "dispatch", "status": "done"},
                     {"name": "run", "status": "current",
-                     "model": "copilot-luna", "elapsed": "3m12s",
+                     "model": "deepseek-v4-flash-go", "elapsed": "3m12s",
                      "phrase": "patching components/shell.rs…"},
                     {"name": "review", "status": "reviewing", "reviewer": "momus",
                      "task_id": "t14:review"},

@@ -412,13 +412,13 @@ def test_hop_shares_the_canned_activity_line_too():
 def test_three_hop_trail_renders_all_hops_in_order_on_a_settled_worker():
     block = reviewed_block()
     block["hop"] = (
-        "claude-opus-5 (rate limit) → copilot-sonnet-5.5 (provider unusable) → deepseek-v4-flash-direct (served)"
+        "claude-opus-5 (rate limit) → deepseek-v4-flash-go (provider unusable) → deepseek-v4-flash-direct (served)"
     )
     text = render_block(block)
     # The run row is settled (done), so the trail gets its own line, not the
     # activity line (there is no activity line on a done row).
     assert (
-        "  ⤵ claude-opus-5 (rate limit) → copilot-sonnet-5.5 (provider unusable) → deepseek-v4-flash-direct (served)"
+        "  ⤵ claude-opus-5 (rate limit) → deepseek-v4-flash-go (provider unusable) → deepseek-v4-flash-direct (served)"
     ) in text
 
 
@@ -445,7 +445,7 @@ def test_hop_trail_degrades_to_fewer_hops_rather_than_overflow():
 def test_rendered_hop_line_stays_within_the_overall_budget():
     block = reviewed_block()
     block["hop"] = (
-        "claude-opus-5 (rate limit) → copilot-sonnet-5.5 (provider unusable) → deepseek-v4-flash-direct (served)"
+        "claude-opus-5 (rate limit) → deepseek-v4-flash-go (provider unusable) → deepseek-v4-flash-direct (served)"
     )
     text = render_status(_run(block))
     assert len(text) <= 2000

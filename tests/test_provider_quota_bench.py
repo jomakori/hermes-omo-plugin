@@ -39,8 +39,8 @@ CLAUDE_REFUSAL = (
     "Received Model Group=claude-sonnet-5"
 )
 # The exact body Copilot returns: a monthly quota with no reset stated.
-COPILOT_REFUSAL = (
-    "litellm.APIError: APIError: Github_copilotException - "
+PROVIDER_REFUSAL = (
+    "litellm.APIError: APIError: ProviderQuotaException - "
     '{"error":{"message":"You have exceeded your monthly quota","code":"quota_exceeded"}}'
 )
 
@@ -73,7 +73,7 @@ def test_the_machine_readable_reset_is_preferred_when_present():
 
 
 def test_a_refusal_that_states_no_reset_reports_none():
-    assert reset_at(COPILOT_REFUSAL) is None
+    assert reset_at(PROVIDER_REFUSAL) is None
     assert reset_at("") is None
 
 
@@ -93,7 +93,7 @@ def test_a_deepseek_go_drain_leaves_the_direct_key_usable():
     # deleted `deepseek-v4-flash-direct` from every chain built afterwards. The
     # next walk then had no later hop and stopped after one PROVIDER_UNUSABLE.
     FallbackState(chain=CHAIN).record_failure(
-        "litellm/deepseek-v4-flash-go", reason=HOP_REASON_PROVIDER_UNUSABLE, message=COPILOT_REFUSAL
+        "litellm/deepseek-v4-flash-go", reason=HOP_REASON_PROVIDER_UNUSABLE, message=PROVIDER_REFUSAL
     )
     assert layer_benched("litellm/deepseek-v4-flash-go")
     assert not layer_benched("litellm/deepseek-v4-flash-direct")
@@ -136,12 +136,12 @@ def test_the_bench_lifts_itself_at_the_stated_reset():
 def test_a_quota_refusal_without_a_reset_benches_a_bounded_window():
     now = 1_791_951_600.0
     FallbackState(chain=CHAIN).record_failure(
-        "copilot-luna", reason=HOP_REASON_PROVIDER_UNUSABLE, message=COPILOT_REFUSAL, now=now
+        "deepseek-v4-flash-go", reason=HOP_REASON_PROVIDER_UNUSABLE, message=PROVIDER_REFUSAL, now=now
     )
     # Bounded, not written off for the month the message mentions: the layer
     # comes back on its own and the next attempt that reaches it re-probes it.
-    assert layer_benched("copilot-luna", now=now + BOUNDED_BENCH_SECONDS - 1)
-    assert not layer_benched("copilot-luna", now=now + BOUNDED_BENCH_SECONDS + 1)
+    assert layer_benched("deepseek-v4-flash-go", now=now + BOUNDED_BENCH_SECONDS - 1)
+    assert not layer_benched("deepseek-v4-flash-go", now=now + BOUNDED_BENCH_SECONDS + 1)
 
 
 def test_a_bounded_bench_never_shortens_a_stated_reset():
