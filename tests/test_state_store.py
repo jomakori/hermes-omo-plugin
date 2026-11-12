@@ -15,8 +15,9 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+from orchestrator import session
 from orchestrator.chains import ChainResolver
-from orchestrator.engine import INTERRUPTED_ERROR, OmoEngine
+from orchestrator.engine import OmoEngine
 from orchestrator.models import BLOCKED, INTERRUPTED, PENDING, RUNNING, SUCCEEDED, Run, Worker
 from orchestrator.store import RunStore
 
@@ -184,7 +185,8 @@ def test_restart_answers_with_the_record_and_names_unfinished_work(tmp_path):
     assert "explore" in status["tree"]
     assert INTERRUPTED in status["tree"]
     worker = restarted.runs[run_id].workers[0]
-    assert worker.error == INTERRUPTED_ERROR
+    # No session here holds it any more, so the record is settled as an orphan (#59).
+    assert worker.error.startswith("orphaned record: no live session for this run")
     assert "unverified" in worker.error
     assert restarted.runs[run_id].recovered is True
     # The registry lists it too, so `status` with no id is not an empty answer.
@@ -196,6 +198,8 @@ def test_a_worker_that_never_launched_is_interrupted_too(tmp_path):
     engine = make_engine(path)
     out = engine.dispatch(goal="long job", target="hephaestus", background=True)
     assert engine.runs[out["run_id"]].workers[0].status in (PENDING, RUNNING)
+    # The process that owned it is gone, so nothing here holds its session any more.
+    session.release_run(out["run_id"])
 
     restarted = make_engine(path)
     assert restarted.runs[out["run_id"]].workers[0].status == INTERRUPTED
