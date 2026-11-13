@@ -193,6 +193,14 @@ class Worker:
     result: Any = None
     error: str = ""
     cancel_requested: bool = False
+    # Runtime-only host-dock bridge state (see orchestrator.host_bridge): never
+    # persisted, like `handle`/`result` above -- a restart has no live writer or
+    # registry row to resume anyway.
+    host_writer: Any = None
+    host_shim: Any = None
+    host_subagent_id: str = ""
+    host_tool_count: int = 0
+    host_bridge_attempted: bool = False
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
     # Task-graph fields. A plain dispatch leaves them empty.

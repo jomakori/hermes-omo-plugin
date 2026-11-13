@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from orchestrator import live_transcript, session
+from orchestrator import host_bridge, live_transcript, session
 from orchestrator.artifact_verify import COULD_NOT_CHECK, default_verifier, verification_for
 from orchestrator.boundary import claim_boundary
 from orchestrator.chains import (
@@ -778,16 +778,63 @@ class OmoEngine:
     def _write_transcript(
         self, run_id: str, *, agent: str = "", task_id: str | None = None, kind: str = "status", text: str = ""
     ) -> None:
-        """Append one line to `run_id`'s transcript; a total no-op without one.
+        """Append one line to `run_id`'s transcript and tee it to the host dock.
 
         The single call site every seam below goes through. ``LiveTranscript.write``
         itself never raises (see its own docstring), so there is nothing to guard
-        here beyond the membership check that makes a missing writer inert.
+        here beyond the membership check that makes a missing writer inert. The
+        host tee rides the same call for the same reason: two feeds written from
+        one seam cannot diverge, and a run with no private transcript can still
+        have a live dock row.
         """
         writer = self._transcripts.get(run_id)
-        if writer is None:
+        if writer is not None:
+            writer.write({"agent": agent, "task_id": task_id, "kind": kind, "text": text})
+        self._tee_host(run_id, agent=agent, task_id=task_id, kind=kind, text=text)
+
+    def _tee_host(self, run_id: str, *, agent: str, task_id: str | None, kind: str, text: str) -> None:
+        """Forward one transcript line to the dock row of the worker it belongs to.
+
+        ``host_bridge.emit`` and ``update_fields`` are already best-effort and the
+        host writer redacts through its own choke point, so no second redaction
+        path exists here. A tool line also bumps the row's tool count, which is
+        what the dock shows instead of the whole tool text.
+        """
+        if not text:
             return
-        writer.write({"agent": agent, "task_id": task_id, "kind": kind, "text": text})
+        worker = self._host_worker(run_id, agent=agent, task_id=task_id)
+        if worker is None or worker.host_writer is None:
+            return
+        host_bridge.emit(worker.host_writer, kind, text)
+        if kind != "tool":
+            return
+        worker.host_tool_count += 1
+        host_bridge.update_fields(
+            worker.host_subagent_id, status=worker.status, tool_count=worker.host_tool_count, last_tool=text
+        )
+
+    def _host_worker(self, run_id: str, *, agent: str, task_id: str | None) -> Worker | None:
+        """The bridged worker a transcript line belongs to, or None.
+
+        A line names its run, agent and task id but not its worker, so the match
+        goes most specific first: exact task id, then agent name. A run-level
+        line names neither, and belongs to no row: its run status already lives
+        on every row of the run, and picking an arbitrary worker would put it on
+        the wrong one.
+        """
+        run = self.runs.get(run_id)
+        if run is None:
+            return None
+        bridged = [worker for worker in run.workers if worker.host_writer is not None]
+        if task_id:
+            for worker in bridged:
+                if worker.task_id == task_id:
+                    return worker
+        if agent:
+            for worker in bridged:
+                if worker.agent_name == agent:
+                    return worker
+        return None
 
     def _emit_transcript_status(self, payload: dict[str, Any]) -> None:
         """Mirror a status-tracker emit onto its run's transcript, e.g. ``t2 -> RUNNING``.
@@ -924,6 +971,66 @@ class OmoEngine:
         except Exception:
             worker.activity_session = ""
 
+    def _attach_host_bridge(self, run: Run, worker: Worker, handle: Any) -> None:
+        """Register this worker in the host's live Subagents dock, once, best-effort.
+
+        Runs right after the launch handle comes back (see ``orchestrator.host_bridge``).
+        A handle whose host names no ``subagent_id`` (older host, a lifecycle shim with
+        no dock concept) degrades silently: the worker still runs, it just gets no row.
+        A later hop/retry on the same worker calls this again but ``host_bridge_attempted``
+        makes every call after the first a no-op -- one row per worker, not per launch.
+        """
+        if worker.host_bridge_attempted:
+            return
+        worker.host_bridge_attempted = True
+        subagent_id = str(getattr(handle, "subagent_id", "") or "")
+        if not subagent_id:
+            return
+        writer = host_bridge.open_writer(goal=worker.task, model=worker.model)
+        shim = host_bridge.register_row(
+            subagent_id=subagent_id,
+            parent_session_id=getattr(handle, "parent_session_id", None),
+            goal=worker.task,
+            model=worker.model,
+            owner_session_id=run.session_id,
+            live_transcript_path=str(writer.path) if writer is not None else None,
+        )
+        worker.host_writer = writer
+        worker.host_shim = shim
+        worker.host_subagent_id = subagent_id
+
+    def _settle_host_bridge(self, worker: Worker, status: str) -> None:
+        """Retire a worker's host-dock row at its terminal status; idempotent, never fatal.
+
+        Guarded by ``host_subagent_id``: a worker never attached (no handle subagent id, or
+        the host unavailable) or already settled reads empty here and is a no-op, so a
+        finished worker never leaves a ghost row and a second settle call cannot
+        double-unregister.
+        """
+        if not worker.host_subagent_id:
+            return
+        subagent_id, shim = worker.host_subagent_id, worker.host_shim
+        worker.host_subagent_id = ""
+        worker.host_shim = None
+        try:
+            host_bridge.update_status(subagent_id, status)
+        finally:
+            host_bridge.unregister_row(subagent_id, shim)
+
+    def _settle_host_rows(self, run: Run) -> None:
+        """Retire the dock row of every worker in `run` that has settled.
+
+        Called from the settle seams (``_wake_when_settled``, ``_outcome``,
+        ``shutdown``) instead of at each terminal return site, so the row can
+        never outlive the worker that owns it. A worker still running keeps its
+        row; ``_settle_host_bridge`` is idempotent, so the overlapping seams
+        cannot double-unregister.
+        """
+        for worker in run.workers:
+            if worker.status in UNFINISHED:
+                continue
+            self._settle_host_bridge(worker, worker.status)
+
     def _progress(self, event: str, payload: dict[str, Any]) -> None:
         """Announce one real transition.
 
@@ -1035,6 +1142,7 @@ class OmoEngine:
                 handle = service.launch(request)
                 worker.handle = handle
                 self._capture_activity_session(worker)
+                self._attach_host_bridge(run, worker, handle)
                 self._write_transcript(
                     run.run_id,
                     agent=worker.agent_name,
@@ -1595,6 +1703,9 @@ class OmoEngine:
         # changes what this payload reports about `worker`.
         self._maybe_auto_retry(run, worker)
         self._release_if_settled(run)
+        # Terminal funnel for a worker, so this is also where its dock row retires
+        # on the synchronous dispatch path (no walk, no wake seam behind it).
+        self._settle_host_rows(run)
         payload: dict[str, Any] = {
             "run_id": run.run_id,
             "agent": AGENTS[worker.agent_name].display,
@@ -1711,8 +1822,11 @@ class OmoEngine:
         A background run reports ``RUNNING`` for however long the work takes, so the
         wake cannot belong to the frame that launched it: it belongs to the last
         worker to settle. Deferring is safe because every settling seam calls this
-        again, and ``Run.woken`` keeps the delivery to one notice.
+        again, and ``Run.woken`` keeps the delivery to one notice. Every call also
+        retires the dock row of any worker that has settled, so a worker whose
+        walk ended without an outcome still cannot leave a ghost row behind.
         """
+        self._settle_host_rows(run)
         if self._unfinished(run):
             return
         self._wake_caller(run)
@@ -1885,4 +1999,7 @@ class OmoEngine:
         # Nothing here is executing any of it now, so no session it served stays held.
         for run in list(self.runs.values()):
             self._release_if_settled(run)
+            # A plugin unload can outlive this process's registry, and a dock row
+            # pointing at a dead writer is worse than no row at all.
+            self._settle_host_rows(run)
         self._persist()
