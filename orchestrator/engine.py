@@ -986,7 +986,10 @@ class OmoEngine:
         subagent_id = str(getattr(handle, "subagent_id", "") or "")
         if not subagent_id:
             return
-        writer = host_bridge.open_writer(goal=worker.task, model=worker.model)
+        # Short label only: the full task is already the dock row goal, and the writer
+        # repeats its goal twice in the header and the kickoff line.
+        label = worker.title or worker.task.strip().splitlines()[0][:60]
+        writer = host_bridge.open_writer(goal=label, model=worker.model)
         shim = host_bridge.register_row(
             subagent_id=subagent_id,
             parent_session_id=getattr(handle, "parent_session_id", None),
@@ -1148,7 +1151,7 @@ class OmoEngine:
                     agent=worker.agent_name,
                     task_id=worker.task_id or None,
                     kind="launch",
-                    text=f"{worker.model or ''} {worker.title or worker.task.strip().splitlines()[0][:60]}".strip(),
+                    text=f"{worker.agent_name} \u00b7 {worker.model or ''}".strip(" \u00b7"),
                 )
                 if worker.cancel_requested:
                     try:

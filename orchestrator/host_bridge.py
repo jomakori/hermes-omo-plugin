@@ -21,8 +21,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# kind -> LiveTranscriptWriter method name; anything unmapped falls back to .event(kind, text).
-_EMIT_METHODS = {"result": "marker", "error": "marker"}
+# kind -> role label the dock renders; a launch line reads as a start.
+_ROLE_ALIASES = {"launch": "start"}
 
 
 def _resolve_parent_agent() -> Any:
@@ -160,11 +160,7 @@ def emit(writer: Any, kind: str, text: str) -> None:
     if writer is None or not text:
         return
     try:
-        method_name = _EMIT_METHODS.get(kind)
-        if method_name:
-            getattr(writer, method_name)(text)
-        else:
-            writer.event(kind, text)
+        writer.event(_ROLE_ALIASES.get(kind, kind), text)
     except Exception as exc:
         logger.debug("host_bridge: emit(%s) failed: %s", kind, exc)
 
