@@ -202,11 +202,14 @@ def test_emit_maps_kinds_onto_writer_methods(host):
     host_bridge.emit(writer, "error", "boom")
     host_bridge.emit(writer, "status", "t2 -> RUNNING")
 
+    host_bridge.emit(writer, "launch", "explore · model")
+
     assert writer.calls == [
         ("event", "tool", "read_file x.py"),
-        ("marker", "done"),
-        ("marker", "boom"),
+        ("event", "result", "done"),
+        ("event", "error", "boom"),
         ("event", "status", "t2 -> RUNNING"),
+        ("event", "start", "explore · model"),
     ]
 
 
@@ -382,9 +385,9 @@ def test_a_sync_dispatch_registers_one_row_and_tees_the_same_lines(host, omo_liv
     assert [line["kind"] for line in worker_lines] == ["launch", "result"]
     # And the host writer saw that same pair, through its own methods.
     launch = worker_lines[0]
-    assert ("event", "launch", launch["text"]) in host.writers[0].calls
+    assert ("event", "start", launch["text"]) in host.writers[0].calls
     result_line = worker_lines[-1]
-    assert ("marker", result_line["text"]) in host.writers[0].calls
+    assert ("event", "result", result_line["text"]) in host.writers[0].calls
 
 
 def test_a_settled_sync_run_leaves_no_row_behind(host, omo_live_dir):
