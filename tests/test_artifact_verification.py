@@ -83,6 +83,32 @@ def test_prose_with_no_artifact_claims_nothing():
     assert extract_claims("Read-only recon; no branch and no PR were produced.") == []
 
 
+def test_a_file_path_naming_tests_is_not_claimed_as_a_branch():
+    # "tests" is a conventional branch prefix too, but tests/informer.rs is a
+    # file a worker touched, not a ref it pushed (observed live: run
+    # omo_0986be9f demoted over exactly this).
+    assert extract_claims("Created tests/informer.rs") == []
+
+
+def test_a_file_path_naming_docs_is_not_claimed_as_a_branch():
+    assert extract_claims("edited crates/openkite-engine/tests/watch.rs and docs/setup.md") == []
+
+
+def test_a_real_branch_with_a_conventional_prefix_is_still_claimed():
+    assert extract_claims("merged feat/okt211-interest-supervisor") == [
+        Claim(kind=KIND_BRANCH, value="feat/okt211-interest-supervisor"),
+    ]
+
+
+def test_a_dotted_release_branch_is_still_claimed_not_mistaken_for_a_file():
+    # release/v1.2.3's final segment is "v1.2.3": its "extension" is ".3",
+    # not a recognized source/doc/config suffix, so it is not a file path and
+    # is still claimed as a branch, same as any other conventional-prefix ref.
+    assert extract_claims("cut release/v1.2.3") == [
+        Claim(kind=KIND_BRANCH, value="release/v1.2.3"),
+    ]
+
+
 # ----------------------------------------------------------------- the gate
 
 

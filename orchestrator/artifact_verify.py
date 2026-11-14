@@ -194,6 +194,40 @@ def _looks_like_sha(token: str) -> bool:
     return any(char.isdigit() for char in token)
 
 
+# Extensions that mark a token as "a file on disk", never a branch — observed
+# live: a worker narrating "Created tests/informer.rs" or "edited
+# crates/.../tests/watch.rs and docs/setup.md" matched _BRANCH because
+# "tests" and "docs" are also conventional branch prefixes, and the verifier
+# then ran ``git ls-remote --heads origin tests/informer.rs``, got nothing,
+# and demoted a genuinely SUCCEEDED run to UNAUTHENTICATED over a file path.
+# Checking the *final path segment* for one of these suffixes is enough to
+# tell a path from a ref without a filesystem lookup. Dotted release tags
+# such as ``release/v1.2.3`` are deliberately NOT caught by this: their final
+# segment is ``v1.2.3``, whose "extension" is ``.3`` — not a recognized
+# source/doc/config suffix — so they still parse as branch claims, same as
+# ``feat/okt211-interest-supervisor``. Per the safe direction documented on
+# ``_looks_like_sha``: a missed claim is not gated, a false claim gates a
+# worker for nothing, so this list only needs to be wide enough to catch the
+# common cases a worker's prose actually produces, not exhaustive.
+_FILE_EXTENSIONS = frozenset({"rs", "py", "md", "ts", "go", "toml", "yaml", "yml", "json", "sh", "txt"})
+
+
+def _looks_like_file_path(value: str) -> bool:
+    """Whether the final path segment carries a recognized file extension.
+
+    A branch claim shaped like ``tests/informer.rs`` or ``docs/setup.md`` is a
+    file a worker touched, not a ref it pushed; such a path happens to start
+    with a conventional branch prefix (``tests/``, ``docs/``, ...) purely by
+    coincidence of English narration. See the module-level note above
+    ``_FILE_EXTENSIONS`` for why ``release/v1.2.3`` is not treated this way.
+    """
+    last_segment = value.rsplit("/", 1)[-1]
+    if "." not in last_segment:
+        return False
+    suffix = last_segment.rsplit(".", 1)[-1].lower()
+    return suffix in _FILE_EXTENSIONS
+
+
 def _pr_claim(value: str, repo: str = "") -> Claim | None:
     """A PR claim from a URL or a bare number, carrying whatever repo is known."""
     text = _clean(value)
@@ -261,7 +295,7 @@ def _claims_from_text(summary: str) -> list[Claim]:
     remainder = _PR_URL.sub(" ", text)
     for match in _BRANCH.finditer(remainder):
         branch = _clean(match.group(0))
-        if branch:
+        if branch and not _looks_like_file_path(branch):
             claims.append(Claim(kind=KIND_BRANCH, value=branch))
     remainder = _BRANCH.sub(" ", remainder)
     for token in _SHA.findall(remainder):
