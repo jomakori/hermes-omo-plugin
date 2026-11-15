@@ -2,619 +2,171 @@
 
 <img src=".assets/readme/hero.svg" alt="hermes-omo-plugin — native multi-agent orchestration for Hermes Agent" width="100%">
 
+# hermes-omo-plugin
+
+A native agent fleet for [Hermes Agent](https://github.com/NousResearch/hermes-agent) — named specialists, task graphs, model fallback and live run telemetry, all through the host's own subagent lifecycle.
+
 <!-- SHIELDS_BADGES -->
-[![CI](https://img.shields.io/github/actions/workflow/status/jomakori/hermes-omo-plugin/ci.yaml?label=CI&logo=githubactions&logoColor=white&color=06B6D4)](https://github.com/jomakori/hermes-omo-plugin/actions/workflows/ci.yaml)
-[![Hermes Agent plugin](https://img.shields.io/badge/Hermes%20Agent-plugin-64748B?logoColor=white)](https://github.com/NousResearch/hermes-agent)
-[![Python](https://img.shields.io/badge/Python-06B6D4?logo=python&logoColor=white)](https://www.python.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-64748B)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/jomakori/hermes-omo-plugin/ci.yaml?style=for-the-badge&label=CI&logo=githubactions&logoColor=white&color=06B6D4)](https://github.com/jomakori/hermes-omo-plugin/actions/workflows/ci.yaml)
+[![Hermes Agent plugin](https://img.shields.io/badge/Hermes%20Agent-plugin-64748B?style=for-the-badge)](https://github.com/NousResearch/hermes-agent)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-06B6D4?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-64748B?style=for-the-badge)](LICENSE)
 <!-- /SHIELDS_BADGES -->
 
 </div>
 
-# hermes-omo-plugin
+## What is this?
 
-Multi-agent orchestration for [Hermes Agent](https://github.com/NousResearch/hermes-agent). It gives the host a roster of named specialist agents — an orchestrator, planners, critics, researchers and engineers — and runs them as Hermes subagents through the host's own lifecycle. Hermes stays the only user-facing identity: workers return structured results, and the host synthesises and speaks.
+A Hermes plugin that gives the host a roster of named specialists — orchestrator, planners, critics, researchers, engineers — dispatches them as subagents, and synthesises their structured results into one reply. Hermes stays the only user-facing identity.
 
-The roster and the orchestration model are inspired by [oh-my-openagent](#relationship-to-oh-my-openagent) (OMO). What differs is the substrate — no second runtime to install, pin or reconcile.
+The roster and model are adapted from [oh-my-openagent](#relationship-to-oh-my-openagent), without its runtime: no OpenCode, no Bun, no SDK to install or pin.
 
-## Install
+## Features
 
-```bash
-hermes plugins install jomakori/hermes-omo-plugin
-hermes plugins enable omo
-```
+| Feature | What it does |
+|---|---|
+| **Agent fleet** | 14 specialists and 5 categories, each with a persona and a default model chain |
+| **Task graphs** | Dependencies, parallel fan-out, `BLOCKED` on a failed dependency, reconcilers that still run |
+| **Owned fallback** | Per-agent chains, cooldown/restore, bounded premium handoff, `hop_history` per dispatch |
+| **Review cycles** | `momus` reviews each task; the verdict is `pass`, `problems`, `unparsed` — never silent |
+| **Live status** | One message per run, edited in place, showing each worker's model and current tool call |
+| **Transcripts** | Append-only JSONL per run, tail-able while it is still live |
+| **OMO Runs tab** | `hermes dashboard` shows the run registry and a live worker feed, read-only |
+| **Advisory routing** | `jev_ask` returns a probability envelope; shadow mode calibrates before anything routes on it |
+| **Durable runs** | Registry survives a gateway restart; `status` and `cancel` reach only your own session |
 
-Or clone it into the host's plugins directory and enable it:
+## Quick Start
 
-```bash
-git clone https://github.com/jomakori/hermes-omo-plugin.git "${HERMES_HOME:-$HOME/.hermes}/plugins/omo"
-hermes plugins enable omo
-```
+1. Install and enable, then restart Hermes so the tools and dashboard tab register:
+
+   ```bash
+   hermes plugins install jomakori/hermes-omo-plugin --enable
+   hermes plugins list   # confirm 'omo' is loaded
+   ```
+
+2. Raise the delegation depth. Hermes derives a child's role from its depth and ignores the role a caller passes, so the default keeps the tree flat:
+
+   ```yaml
+   delegation:
+     max_spawn_depth: 2   # default 1: a child cannot delegate further
+   ```
+
+3. Dispatch, then collect:
+
+   ```json
+   {"action": "dispatch", "goal": "harden the sync path", "agent": "hephaestus"}
+   ```
+
+   Blocks until the run settles; add `background=true` for a `run_id` and poll with `status`. `omo_task` delegates one subtask by `agent=` or `category=`.
+
+Requires Hermes Agent with plugin and subagent-lifecycle support, and Python 3.11+ (the host's interpreter — no extra runtime dependencies).
+
+Optional: `TYPESAFE_AI_API_KEY` for `jev_ask`, and Discord's **Manage Messages** if the status message should stay pinned. Update with `hermes plugins update omo`, remove with `hermes plugins remove omo`.
 
 ## Configuration
 
-Settings are read from `plugins.entries.omo.settings` in the host's `config.yaml`. Model names resolve through the host's provider routing, so use the aliases that routing already exposes.
+Settings live in `plugins.entries.omo.settings`. Model names resolve through the host's provider routing, so use the aliases it already exposes.
 
-```yaml
-plugins:
-  enabled:
-    - omo
-  entries:
-    omo:
-      settings:
-        mcp_enabled: true
-        max_fallback_attempts: 3
-        cooldown_seconds: 30
-        restore_primary_after_cooldown: true
-        escalation_budget_chars: 6000   # payload the premium (last-hop) model receives
-        max_attempts_per_agent: 3       # failures of one stage by one agent, engine-wide
-        state_path: ~/.omo/runs.json    # where the run registry is persisted
-        max_persisted_runs: 50   # runs kept in that record; 0 keeps everything
-        max_parallel: 4          # tasks in flight for one graph dispatch
-        worker_timeout_seconds: 1800    # hard bound on one child
-        worker_stall_seconds: 360       # no new message for this long => stop it; 0 disables
-        worker_activity_slice_seconds: 20   # how often the watchdog looks at a child
-        max_review_cycles: 1     # reviewer passes per task; 0 disables review
-        status_message_enabled: true     # one live status message per run
-        status_pin_message: true         # pin that message while the run is live (needs Manage Messages)
-        status_edit_interval: 2.0        # seconds between edits (throttle floor)
-        status_move_interval: 0.0        # struct moves (post fresh + delete old); 0 = edit in place, never move
-        status_phrase_interval: 3.0      # seconds between rotating phrase lines / activity refresh
-        # activity_profiles_dir: /data/profiles   # optional; defaults to <hermes home>/profiles
-        enabled_agents: []       # empty = the whole roster; list names to restrict it
-        roles:                   # caller-facing role names -> roster entries
-          implementer: hephaestus
-        chains:
-          sisyphus:
-            - "<provider>/<model>"
-            - "<provider>/<fallback>"
-```
+| Setting | Default | What it controls |
+|---|---|---|
+| `enabled_agents` | unset (all) | Restrict the roster to these names |
+| `roles` | `ROLE_ALIASES` | Role names → roster entries or categories |
+| `chains` | `roster.py` | Per-agent model chains, primary first |
+| `max_parallel` | `4` | Tasks in flight for one graph dispatch |
+| `max_review_cycles` | `1` | Reviewer passes per task; `0` disables review |
+| `worker_stall_seconds` | `360` | No new message for this long ⇒ stop the child; `0` disables |
+| `state_path` | `~/.omo/runs.json` | Where the run registry is persisted |
+| `status_message_enabled` | `true` | The live status message |
 
-Anything omitted falls back to the defaults in `roster.py`.
-
-One host setting matters for the planning pipeline: Hermes derives a child agent's role from its depth and ignores any role a caller passes, so `delegation.max_spawn_depth` must be raised above its default or the tree stays flat and the orchestrator cannot delegate.
+The other 15 settings — chain budgets, watchdog windows, status cadence, transcript directory — are in [docs/configuration.md](docs/configuration.md).
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `omo` | `dispatch` (one task or a whole graph) / `status` / `tree` / `cancel` — the reads and `cancel` are scoped to the calling session unless `all_sessions=true` |
-| `omo_task` | Delegate one subtask (`agent=`) or spawn a category worker (`category=`) — attributed to the calling session like any dispatch |
-| `jev_ask` | Advisory [TypeSafe Jev](#jev_ask--advisory-decisions) typed-decision classifier (`route_intent` / `gate_risk` / `pick_skill` / `pick_agent`) — returns a probability envelope; **never executes anything** |
+| `omo` | `dispatch` (one task or a whole graph) / `status` / `tree` / `cancel`, scoped to the calling session unless `all_sessions=true` |
+| `omo_task` | Delegate one subtask (`agent=`) or spawn a category worker (`category=`) |
+| `jev_ask` | Advisory typed-decision classifier; returns a probability envelope and never executes anything |
 
-`omo_task` takes exactly one of `agent=` or `category=`.
-
-### `jev_ask` — advisory decisions
-
-`jev_ask` asks [TypeSafe Jev](https://typesafe.ai) — a small **typed-decision classifier** (not a chat model; it returns probabilities over an option set, never text) — for a judgment and hands the result back as a code-authored envelope. It is **advisory by construction**: Jev answers, code decides, and the tool executes nothing.
-
-Four packs ship (`pack=`):
-
-| Pack | Primitives | State keys |
-|---|---|---|
-| `route_intent` | `choice` tier (trivial/quick/scoped/exploratory/complex/ambiguous) + `choice` domain | `user_message`, `last_question`, `cwd_basename` |
-| `gate_risk` | `noul` irreversible / external_side_effect / destructive / secrets_involved | `action_text`, `dry_run` |
-| `pick_skill` | `choice` over a caller-supplied shortlist (`skill_shortlist`, ≤255) | `user_request`, `shortlist` |
-| `pick_agent` | `choice` over a candidate map of agents + categories (`agent_candidates`, ≤255; defaults to the enabled roster) | `user_message`, `last_question`, `cwd_basename` |
-
-The envelope is always valid JSON and never raises: `{pack, pack_version, backend, model, status, decisions, usage, cost_usd, latency_ms, notes}`. `status` is `ok` or `unavailable`; on `unavailable` (key missing, timeout, a non-retryable error, or `jev_enabled=false`) the pack's deterministic defaults are returned so the caller branches and continues — nothing blocks. State is **default-deny** (only the pack's allowlisted keys are sent) and **redacted** (bearer tokens, key-like strings, secrets) before it leaves the cluster. Latency is measured client-side — Jev returns none.
-
-Config, under `plugins.entries.omo.settings`:
-
-```yaml
-jev_enabled: true                       # false short-circuits to defaults
-jev_base_url: "https://api.typesafe.ai"
-jev_model: "jev-latest"
-jev_timeout_s: 10
-jev_api_key_env: "TYPESAFE_AI_API_KEY"  # read from the environment at call time
-# jev_thresholds: {destructive: 0.9}    # optional per-primitive overrides
-```
-
-Requires the `TYPESAFE_AI_API_KEY` env var. The key is never logged or returned.
-
-### Shadow mode & calibration
-
-Phase 2 lets Jev run **beside** dispatch without touching it. When `jev_shadow_enabled` is on, every `dispatch` fires the configured packs against the same input on a **daemon thread**, records Jev's verdict next to the decision the engine actually made, and returns immediately — the shadow call never adds latency to, or fails, a dispatch, and any error (bad path, full disk, Jev down) is swallowed. Nothing in the routing path reads the result.
-
-The harness runs **`pick_agent`** by default: its candidate map (agents + categories) is the same vocabulary the engine resolves to, so `caller_decision` and Jev's `agent` choice are compared like-for-like rather than across unrelated label spaces.
-
-Each row is one JSON object in a JSONL sink: `{ts, pack, state_hash, jev_decisions, jev_confidence, caller_decision, agreed, latency_ms, model, status}`. `state_hash` is a **sha256 of the input** — raw state, prompts, and the API key are never written.
-
-`jev_report` prints the roll-up: total records, per-pack counts, agreement %, ECE, Brier, and the most recent disagreements (bounded).
-
-```yaml
-jev_shadow_enabled: false                            # observation only; default off
-jev_shadow_path: "~/.omo/jev-shadow.jsonl"           # JSONL sink
-jev_shadow_packs: ["pick_agent"]                     # packs run in shadow (like-for-like with dispatch)
-```
-
-ECE and Brier are computed against `agreed` as the 0/1 outcome, so the numbers measure how well Jev's confidence tracks agreement with the engine — the calibration gate before any Phase 3 cutover.
-
-### Authoritative mode (opt-in)
-
-**Default off.** With `jev_routing_enabled: false` — the default — dispatch is byte-identical to before Jev existed. Turning it on lets Jev's `pick_agent` verdict choose the dispatch target, but only inside a deterministic cage:
-
-- **Floor.** An explicit `agent=`/`category=` from the caller always wins; Jev is not consulted for it.
-- **Validity.** Jev's pick is accepted only if it names an **enabled** roster agent or a category. An out-of-vocabulary answer (defended against even though Jev can only return a member of the option set) is ignored.
-- **Threshold.** The pick must score at least `jev_routing_threshold` (default `0.75`).
-- **Fail-open.** Off-spec answers, a timeout (bounded by `jev_timeout_s`), a missing key, or any error fall back to the static resolution unchanged — the static path is the safety net.
-
-Every accepted/rejected decision emits a `jev_route` event naming `source` (`jev`|`static`), `confidence`, and the chosen `target`.
-
-> **Do not enable this until shadow evidence clears the bar.** Run `jev_shadow_enabled` first and confirm the agreement/ECE/Brier numbers show Jev is calibrated on *our* traces for the `pick_agent` pack. Enablement is a config decision, not a code one; the flag exists so a revert is a single config flip.
-
-```yaml
-jev_routing_enabled: false    # authoritative dispatch; default off — shadow first
-jev_routing_threshold: 0.75   # min pick_agent confidence to override the static target
-```
-
-
-
-
-Dispatch blocks by default; pass `background=true` to get a `run_id` immediately and poll it with `status`. The flag applies to a `tasks=` graph as well as to a single task: the graph is declared, its `run_id` returned, and the schedule runs off the tool call instead of holding it open until the last task settles. The run registry is **durable**: runs and their workers are checkpointed to `state_path` as they change, so a gateway restart answers `status` from the record rather than from an empty list. A worker whose process is gone is reported `INTERRUPTED` — the record is real, the work it was doing is not verified.
-
-### A run belongs to the session that dispatched it
-
-One gateway process serves every session, so the run registry is shared — an unfiltered `status` would hand one session another's runs, and `cancel` would let it kill work it did not pay for. Each run therefore records its owner's session id, resolved through the host's own bridge (`gateway.session_context`, the accessor Hermes' tools use: the task-local session ContextVar, with `os.environ` as the fallback), and:
-
-- `status` and `tree` answer for **this session's runs only**; the payload carries `session_id` and `scope`, plus `hidden_runs` when records exist that the caller cannot see.
-- `cancel` **refuses** a run belonging to another session. The error names the owning session — `run omo_1a2b3c4d belongs to session ses_… , not the calling session (ses_…); pass all_sessions=true to reach across sessions.`
-- `all_sessions=true` is the explicit opt-in that lifts the scope for `status`, `tree` and `cancel` — the escape hatch for a deliberate cross-session inspection or takeover.
-
-Attribution degrades safely: a host with no such bridge (or one whose import fails) records no session id rather than failing the dispatch, and a record written **before** attribution existed has no owner at all — it belongs to no session, so it is hidden from a real session's default view and reachable only under `all_sessions=true`. Nothing raises.
-
-Every payload that reports worker activity carries a machine-readable boundary:
-
-```json
-"claim_boundary": {
-  "boundary": "not_evidence_until_observed",
-  "observed": ["status", "model", "cancelled", "error", "client_gone", "result.terminal_state", "result.usage_metadata", "result.tool_execution_summary", "result.error_message"],
-  "self_reported": ["result.summary", "result.structured_payload"]
-}
-```
-
-`observed` is what the engine read from the host's own record of the run. `self_reported`
-is what the worker wrote about itself — a claim, not evidence, to be checked against
-something the host can see (the working tree, the tests, git) before it is repeated to the
-user. A worker that says it refactored a module has not thereby refactored it. Validation
-errors (`{"error": "goal is required to dispatch."}`) carry no boundary, because no worker
-ran.
-
-## Live status message
-
-Every run owns **one** live struct in the conversation that dispatched it — one
-per `run_id`, never a second. It is **edited in place**: posted once and then
-updated as the run progresses, so the one message stays current. The struct only
-**moves** when `status_move_interval > 0` (it defaults to `0`, which disables
-moving): then a changed render is re-posted below the newest message and the
-previous copy deleted, so it follows the conversation instead of being buried by
-it. A graph run with four workers still owns a single struct; each worker is one
-condensed block inside it. So `status_message_enabled: false` turns the whole
-surface off.
-
-```
-🏗️ omo · omo_304bf8e5 — shell parity across the fleet · 3 workers
-
-OKT-161 · hephaestus · Deep Agent
-- run 🔁 t4 · minimax-m3
-  ↳ ✍️ write_file components/shell.rs · ⤵ claude-sonnet-5 (rate limit)
-- review ⏳
-
-analysis stage · metis · Plan Consultant
-- run ⛔ waiting on prometheus
-- review ⏳
-
-architecture · oracle · Architecture / Reasoning
-- run ⚠️ gateway restart
-- review ✅ momus · problems (cycle 1)
-```
-
-**Shape.** The goal is stated **once** in the run heading —
-`🏗️ omo · <run_id> — <goal≤60>` (`· N workers` appended at fan-out) — and never
-repeated per worker. Each worker is then one block whose first line is
-`<label> · <agent display>`, where the display is the roster line from
-`roster.AgentSpec.display` (`hephaestus · Deep Agent`) and `<label>` is a
-condensed form of the task: the ticket id when one is present, else the first
-clause, cut on a word boundary to 24 characters at fan-out above 8 (44 otherwise).
-A long label is cut at a word boundary and never ends in an ellipsis — no rendered
-line does, apart from the deliberate `…N more` collapse marker.
-
-Each block lists three phases in order — `dispatch`, `run`, `review` — one
-`- <phase> <emoji>` row each. The `dispatch` row is dropped once the worker has
-started (the run row implies it), and the whole `review` row is dropped when the
-run was created with `review: false` (read straight off the payload, never
-inferred):
-
-| Emoji | Meaning |
-|---|---|
-| 🔁 | running — the row also carries `<task_id\|run_id> · <serving model>` |
-| ⏳ | pending |
-| ✅ | done — a finished run row carries its duration (`22m`) |
-| 🔍 | reviewing — `reviewer · run_id · task_id:review` |
-| ⛔ | blocked on a dependency — the cause is named (`waiting on prometheus`) |
-| ⚠️ | interrupted — the cause is named (`gateway restart`) |
-| ❌ | failed — the cause is the worker's error, never an echo of the task |
-| ⏸ | cancelled — the cancellation cause |
-| ⏭ | skipped — mapped by `STATUS_EMOJI`; no live transition emits it yet |
-
-The renderer's map (`orchestrator/status_message.py`, `STATUS_EMOJI`) is the
-source of truth for that table; a status the tracker never produces still gets a
-glyph rather than `KeyError`.
-
-The 🔁 `run` row is the only one with a line under it: the worker's **real tool
-call**, `  ↳ {emoji} {tool} {target}` (emoji resolved from the host registry with
-`registry.get_emoji`, capped at ~48 characters), refreshed on the rotation
-cadence and changing when the tool changes. When the chain fell back the hop is
-appended on that same line (`· ⤵ claude-sonnet-5 (rate limit)`). Until a call is
-observable the rotating `  ↳ cycling: <phrase> (3s)` line stands, so the line is
-never blank. Review rows are **folded into the producing worker's block** — the
-reviewer and verdict are named on the row (`review ✅ momus · problems (cycle 1)`,
-`review 🔍 momus · <run> · <task>:review`), never a block of their own. A message
-is capped at Discord's 2000 characters: long block lists collapse with `…N more`,
-and only if even the headers overflow are trailing blocks folded into `…N more
-agents`.
-
-**Delivery.** The struct is posted on the run's first transition and then
-**edited in place**, so one message serves the whole run. Moving is opt-in: with
-`status_move_interval` above `0` (default `0`, off), once that cadence elapses a
-changed render posts a fresh copy below the newest message, deletes the previous
-copy, and persists the new id — in that order, so a failed post leaves the
-previous struct in place rather than losing the only live one; between moves a
-changed render is edited in place. On a **terminal** state the struct never moves:
-the final render is an edit, so the last struct stays exactly where it is. The id
-is persisted on the run record (`state_path`), so a gateway restart keeps the same
-message; a stored id that is **gone** falls back to posting fresh once, never to a
-dead edit loop. A move's delete is best-effort — a platform without a deletion API,
-or a failed delete, leaves the previous copy behind (the new id is tracked either
-way).
-
-**Pinning.** With `status_pin_message` on (the default), the struct is **pinned**
-as soon as it is posted, so it stays at the top of the channel instead of being
-buried while the run is live, and is **unpinned exactly once** — the moment the
-run reaches a terminal state in which **every worker succeeded**. Any other
-outcome leaves it pinned: a run that fails, is blocked, is cancelled, is
-interrupted, or is simply still running stays pinned, as does a fan-out where one
-worker succeeded and another did not. A move pins the fresh copy and releases the
-previous one. The pinned message id is persisted alongside the message id on the
-run record (`status_pinned_id`), so an unpin — or the cap eviction below — still
-knows which pin is ours after a restart. Idempotence is a latch in the tracker:
-once released, a late tick or a duplicated terminal event cannot release it again.
-
-Pinning is best-effort, like the rest of the status surface, and has three
-limitations worth stating plainly:
-
-- **Manage Messages is required.** Pinning is a permission, and the bot needs
-  **Manage Messages** in the channel (or the thread's parent) to set and clear a
-  pin. Without it the platform refuses the pin and it is logged as a warning
-  (403 / 50013) and skipped — the status message still posts and edits, it just
-  does not stay pinned. Grant the permission, then verify a live pin in Discord;
-  nothing here can prove it against the real API.
-- **Discord only.** Reaching the message goes through `channel.get_partial_message(id)`
-  and the `pin`/`unpin` calls of the Discord client. A platform without that
-  capability, or a transport without a reachable client, degrades to a logged
-  no-op — never an error that could fail the run.
-- **A private coupling.** The adapter exposes no public client, so the transport
-  reaches the bot through its private `_client` attribute (a public accessor is
-  preferred when one exists). If the host renames `_client`, pinning **fails
-  safe**: it logs a debug line and becomes a no-op, while posting and editing keep
-  working.
-
-The pin cap (Discord's 50 pins per channel, error `30001`) is handled without
-touching anyone else's pins: on a cap refusal, the **oldest pin this plugin owns**
-(read off the run records) is released and the pin is retried **exactly once**. If
-there is no pin of ours to release, the pin is simply not taken.
-
-**Keeping it alive.** The renderer is pure (`orchestrator/status_message.py`,
-run state → exact string) and the throttle/dedupe/move rules are a pure state
-machine (`orchestrator/status_tracker.py`, no Discord, no clock — both injected):
-
-- the first render posts; later changed renders edit in place, or — only with
-  `status_move_interval > 0` — move past that cadence instead;
-- a render whose text is unchanged is skipped entirely (no-op dedupe);
-- otherwise edits are throttled to at least `status_edit_interval` (default 2s);
-- a throttled change is remembered and flushed on the next tick, so a fast burst
-  of transitions never loses the last state;
-- the in-progress `run` phrase rotates and the worker's tool call is re-read every
-  `status_phrase_interval` (default 3s) so the message stays visibly alive;
-- a terminal state **always** forces a final edit, ignoring the throttle — and
-  never a move.
-
-**Activity.** The `  ↳` line is read from the worker's own Hermes profile store
-(`profiles/<agent>/state.db` → `messages`: `tool_name`, `tool_calls`, `timestamp`)
-by `orchestrator/worker_activity.py`. The launch handle names no child session
-(`SubagentHandle` carries `subagent_id`/`parent_session_id`/`correlation_id`, and
-the child's `sessions` row carries the *parent* id), so the mapping is the
-profile's **newest session at launch**, captured once and pinned on the worker;
-that is exact for one worker of an agent at a time and approximate when two of the
-same agent launch within the same instant. The emoji comes from the host tool
-registry at runtime (`registry.get_emoji(tool, default="⚡")`), never a hardcoded
-map — the plugin stores no tool→emoji table, so a new tool is rendered the moment
-the host registers it. The values the host currently holds for the tools a worker
-actually reaches for:
-
-| Tool | Emoji |
-|---|---|
-| `read_file` | 📖 |
-| `write_file` | ✍️ |
-| `patch` | 🔧 |
-| `search_files` | 🔎 |
-| `terminal` | 💻 |
-| `skill_manage` | 📝 |
-| anything unregistered | ⚡ (the `get_emoji` default) |
-
-Any failure — no session, no DB, a locked or unreadable store — leaves the
-canned phrase in place.
-
-Delivery is best-effort by contract: a status message is a courtesy, so a failed
-post, move or edit never fails the run it describes. The adapter's HTTP session is bound
-to the gateway's event loop, so delivery is **scheduled onto that loop** from the
-status worker thread (`asyncio.run_coroutine_threadsafe`) rather than run on a
-fresh loop — the same cross-thread hop the host's own dispatch uses. There is **no
-plugin-facing "send" verb** (`ctx.platform_actions` exposes only `add_reaction` and
-`set_thread_title`), so the transport resolves the adapter through the runner's own
-profile-aware, fail-closed `_authorization_adapter` lookup — a documented deviation
-from the consent-gated facade, since no capability for this verb exists to grant.
-See `orchestrator/gateway_status.py`.
-
-**Events.** Transitions are announced as **bare** event names (the host
-namespaces them as `omo:<name>`, so a pre-prefixed name is rejected):
-
-| Event | Emitted at |
-|---|---|
-| `worker_running` / `worker_succeeded` / `worker_failed` / `worker_cancelled` / `worker_done` | `engine.py` — a worker's status change (`_run_sync`, and the background wrapper) |
-| `worker_interrupted` | `engine.py` — a worker recovered as interrupted after a restart, or on shutdown |
-| `run_created` | `graph.py` — the run record is written |
-| `task_started` / `task_blocked` | `graph.py` — a task is submitted, or blocked on a failed dependency |
-| `task_settled` | `graph.py` — a task's future completes |
-| `review_verdict` / `reviewer_failed` | `graph.py` — a review returns a verdict, or the reviewer itself fails |
-| `run_finished` | `graph.py` — the final payload is built |
-
-A worker event's payload carries the facts the live row needs beyond the ids: the
-roster `display`, the serving `model`, the worker's `error` (so a stopped row names
-its reason), the chain `hop` it fell back to (empty on success), and the
-`activity_session` its tool call is read from. `run_created` carries the `review`
-flag the renderer obeys.
-
-## Live transcripts and the OMO Runs dashboard
-
-Two read-only surfaces sit beside the run registry; neither writes anything,
-and neither can fail a run.
-
-**Per-run JSONL.** Every run appends to `~/.omo/live/<run_id>.jsonl` while it
-runs — one JSON object per line, `{seq, ts, agent, task_id, kind, text}`, with
-`kind` one of `launch` / `status` / `tool` / `result` / `error` — so it can be
-tailed while the run is still live:
-
-```bash
-tail -f ~/.omo/live/omo_304bf8e5.jsonl
-```
-
-The dispatch result (and `omo action=status`) names that file: `live_transcripts`
-maps each worker's `task_id` — or its roster name when there is none — to the
-run's path, and `live_transcript_hint` is that path as one line to follow.
-`status` adds `transcript_lines` for runs that have a transcript. Text is
-redacted and capped at 500 characters, files older than seven days are pruned,
-and a transcript that cannot be written leaves the run unaffected. Format,
-kinds, readers (`read_since`, `tail_text`) and retention are in
-[`docs/live-transcript.md`](docs/live-transcript.md).
-
-**The OMO Runs tab.** The plugin's `dashboard/` half registers a web-UI tab —
-`/omo`, labelled `OMO Runs` in `dashboard/manifest.json` — over the read-only
-API in `dashboard/plugin_api.py`, mounted at `/api/plugins/omo/`. It reads
-`~/.omo/live` and `~/.omo/runs.json` and writes neither. Left: the registry,
-newest first, one row `<title or goal> · <state> · <age> · N workers`, badged
-`LIVE` while a worker is unfinished. Right: the selected run's worker roster
-(`agent`, `status`, `last tool · last activity`) above a live feed of its
-transcript, `<HH:MM:SS> <agent> · <kind>: <text>` — tool lines dimmed, `result`
-green, `error` red. The run list polls every 5s, the feed every 1.5s with
-`?since=<next_since>&limit=200` and no requests while the tab is hidden, and the
-feed stops polling as soon as the run goes inactive. A reader who has scrolled
-up is not dragged back to the bottom.
-
-The tab reads the default live dir, so overriding `live_transcript_dir` moves
-the writer without moving the tab.
-
-## Task graphs
-
-Work with dependencies goes in one call instead of a sequence of dispatches:
-
-```json
-{"action": "dispatch", "goal": "harden the sync path", "review": true, "tasks": [
-  {"id": "recon",  "agent": "explore",  "prompt": "map how sync works today"},
-  {"id": "fix",    "agent": "debugger", "prompt": "fix the race", "depends_on": ["recon"]},
-  {"id": "test",   "agent": "tester",   "prompt": "cover the race", "depends_on": ["fix"]},
-  {"id": "docs",   "agent": "writing",  "prompt": "note the fix", "depends_on": ["fix"]}
-]}
-```
-
-Independent tasks run in parallel, bounded by `max_parallel`; a dependent runs only
-after its dependencies finish, and it receives their summaries as its context — so the
-task that reports on the work reads what was actually done instead of guessing.
-A dependent of a failed task is reported `BLOCKED` and never launched, so a failure
-cannot silently feed a broken input downstream. The exception is a reconciler: a task
-marked `"runs_on_failure": true` runs even when a dependency failed, because blocking
-it would hide the failure from the only task asked to name it.
-
-**A child that stops working is stopped, not waited out.** Every worker used to be
-awaited in one blocking call for the whole `worker_timeout_seconds` (30 minutes by
-default), so a child that hung at minute two still held its slot — and the run — until
-minute thirty. The engine now waits in `worker_activity_slice_seconds` slices and reads
-the child's own message store: while it keeps writing, nothing happens but a
-`worker_heartbeat` progress event (at most one a minute, carrying elapsed and idle
-seconds, so a live message ages visibly). When the newest message is older than
-`worker_stall_seconds` the child is cancelled with the reason and the hop fails with
-`watchdog stopped it: no activity for Ns` — six minutes instead of thirty.
-Stall detection is evidence-only: an unpinned session, an unreadable store, or a host
-that keeps no transcript means no liveness signal, and then the hard timeout is again
-the only bound. A watchdog that guessed would kill slow work.
-
-```json
-{"action": "dispatch", "goal": "harden the sync path", "tasks": [
-  {"id": "recon",  "agent": "explore",  "prompt": "map how sync works today"},
-  {"id": "fix",    "agent": "debugger", "prompt": "fix the race", "depends_on": ["recon"]},
-  {"id": "report", "agent": "sisyphus", "prompt": "report what shipped and what broke",
-   "depends_on": ["fix"], "runs_on_failure": true}
-]}
-```
-
-A task that closes cleanly without a summary and without a structured payload is
-reported `FAILED` (`require_worker_summary`, on by default): an empty result is not
-evidence of work, and downstream tasks would otherwise reconcile against nothing.
-A declaration is rejected before anything runs if ids repeat, a dependency is
-unknown or points at itself, a cycle exists, or a task carries both `agent` and
-`category` — a rejected graph is rendered as `{"error": ..., "rejected": true}` so
-the caller can fix it and resubmit.
-
-## Review cycles
-
-`"review": true` runs `momus` over each successful task and re-runs that task with
-the reviewer's notes, at most `max_review_cycles` times (`0` disables it). The
-reviewer must answer `{"verdict": "pass"|"problems", "problems": [...]}`; a verdict
-the scheduler cannot parse is treated as a pass rather than as a failure, so an
-unparseable review can never cause an infinite rewrite. Reviewer workers appear in
-the run tree as `<task>:review`.
-
-Every reviewed task reports what the review actually concluded, in
-`review_verdict`:
-
-| Value | Meaning |
-|---|---|
-| `""` | no review ran |
-| `pass` | the reviewer passed it, or listed no problems |
-| `problems` | the reviewer listed problems; the task was re-run with them |
-| `unparsed` | the reviewer answered, but in a shape the scheduler could not read |
-| `reviewer_failed` | the reviewer never completed |
-
-Only `problems` re-runs a task. The other outcomes leave it exactly as it was —
-but they are named, so "reviewed and clean" is never confused with "the review
-could not be read". The verdict is derived from the reviewer's own text, so the
-claim boundary files it as self-reported.
-
-## Bounds on the chain walk
-
-A chain walk is cheap until it is not. The last element of every chain is the
-premium, quota-bounded route, and a stage that keeps failing re-walks the whole
-chain from the primary every time it is dispatched. Three bounds apply.
-
-**The last hop carries a bounded handoff.** Advancing onto the final chain element
-sends a brief plus explicit artifacts instead of re-issuing the full launch payload
-verbatim: `escalation_budget_chars` (default `6000`, `0` disables) bounds the goal
-plus the caller's task context. The worker contract and persona are constant per
-agent rather than accumulated payload, so they travel whole — still inside the
-host's 32,000-character launch-context cap. Earlier hops are unchanged: a cheaper
-model is handed exactly the brief the primary got. What this does *not* bound: the
-host builds a child's system prompt from the launch request and adds its own
-workspace and project-context blocks, which are not fields of the launch request and
-so cannot be trimmed from here.
-
-**Attempts are bounded per agent.** `max_attempts_per_agent` (default `3`, `0`
-disables) caps how many times one agent may fail *the same stage* before the engine
-refuses another attempt. The host's `max_turns` bounds one agent's loop; it does not
-bound how many times this engine will pay for work that is looping. The count is per
-`(agent, stage)` and lives engine-wide, so it survives the fallback state that every
-dispatch rebuilds from scratch. A cancelled attempt is not a stage failure and does
-not consume the budget. The refusal is reported like any other failure, naming the
-budget.
-
-**A request whose client is gone is not re-issued.** A `499` — client closed request,
-client disconnected — is a hard stop: the walk does not advance onto the next model,
-the worker is reported `cancelled` rather than `failed`, and the payload carries
-`"client_gone": true`. This holds even when `retry_on_errors` lists `499`: the CLI
-behind the disconnect cannot deliver an answer, so re-issuing it only spends input
-tokens nobody can receive.
-
-## Hop telemetry
-
-Every dispatch reports `hop_history`: the hops that were tried, in order, each as
-`{"model": …, "reason": …}`, and the same list rides on the run row from `status`.
-The last entry is the exit point of the cascade — `success` names the hop that
-actually served the request, so a primary that answers is still visible as one
-entry rather than as silence.
-
-**Reasons.** `billing` (a drained account: HTTP 402, `insufficient balance`,
-`add credits`), `rate_limit` (429 or a quota body), `transport` (5xx, timeouts,
-connection errors), `semantic` (non-retryable failures, abort, context overflow),
-and `success`. Billing is its own bucket because it is not a transient: it says the
-account cannot serve at all, which is exactly the case the rest of the chain exists
-for.
-
-**Why it matters.** Only the terminal hop used to be visible, which is how a dead
-primary or a drained model group stayed hidden: a run that spent four hops looked
-identical to a run that answered on the first. Two numbers become readable from
-`hop_history` — the fraction of requests that exit at each hop (how much traffic
-stops before the premium route), and how much of the failure mass is networking
-versus the provider refusing (transport versus semantic). A hop is recorded with a
-reason whether it was abandoned or whether it carried the answer.
-
-## Role names
-
-Callers can ask for a role instead of a codename — `explorer`, `researcher`,
-`planner`, `implementer`, `tester`, `debugger`, `reviewer`, `security`,
-`documenter`, `general` — resolved through `ROLE_ALIASES` and overridable with the
-`roles` setting. `documenter` routes to the
-`writing` category and `general` to `quick`, so an alias may point at a category
-as well as an agent — which is the only way to reach `sisyphus-junior`, a worker
-that refuses to be a direct target. Setting `enabled_agents` restricts the
-roster; a disabled agent is refused with the list of what is enabled.
-
-## Worker contract
-
-Every launch context opens with the internal-worker contract: the worker is told it
-is not the assistant, that user-facing communication is disabled, and that its
-findings go back to the orchestrator with what it verified separated from what it
-assumed. This is prepended to the persona (and delivered even when a roster entry
-has no persona), so it cannot be lost by editing a prompt — the host also never
-gives a worker a channel to the user, so the contract states a fact rather than
-asking for compliance.
-
-The clause travels in the launch *context*: a child's system prompt is built by the
-host and a plugin cannot replace it. A live probe (2026-09-22) asked a worker to
-name itself and it answered "Hermes", so treat the wording as guidance rather than a
-guarantee. The guarantee is architectural — a worker has no channel to the user, so
-whatever it calls itself never reaches one.
 ## Fleet
 
-`roster.py` is the source of truth for who exists and its default model chain. Each agent's persona is `agents/<name>.md`, delivered per dispatch (see below) and loadable in full as `skill_view("omo:<name>")`.
+[`roster.py`](roster.py) is the source of truth. Each persona is `agents/<name>.md`, delivered per dispatch and loadable as `skill_view("omo:<name>")`.
 
-| Agent | Role |
+| Agent | Role | Agent | Role |
+|---|---|---|---|
+| `sisyphus` | Ultraworker | `librarian` | Research |
+| `hephaestus` | Deep Agent | `explore` | Repository Exploration |
+| `prometheus` | Plan Builder | `multimodal-looker` | Multimodal Analysis |
+| `atlas` | Plan Executor | `sisyphus-junior` | Specialized Execution |
+| `metis` | Plan Consultant | `tester` | Test Author |
+| `momus` | Plan Critic | `debugger` | Defect Investigator |
+| `oracle` | Architecture / Reasoning | `security` | Security Reviewer |
+
+Categories — `quick`, `deep`, `ultrabrain`, `visual-engineering`, `writing` — spawn the execution worker with a category-specific chain. Roles (`explorer`, `planner`, `implementer`, …) resolve through `ROLE_ALIASES` and the `roles` setting; `documenter` points at the `writing` category and `general` at `quick`, the only route to `sisyphus-junior`.
+
+## Project Structure
+
+```
+hermes-omo-plugin/
+├── agents/                  # one persona per roster entry
+├── dashboard/               # OMO Runs tab: manifest, read-only API, built UI
+├── docs/                    # contract, config, features, audits
+├── jev/                     # typed-decision client, packs, shadow harness
+├── omo_tools/               # omo / omo_task / jev_ask handlers
+├── orchestrator/            # engine, graph, chains, store, status, transcripts
+├── skills/                  # bundled skill docs
+├── tests/
+├── __init__.py              # register(ctx): tools, commands, skills, dashboard
+├── plugin.yaml              # manifest (name: omo, version)
+└── roster.py                # fleet: agents, categories, default chains
+```
+
+## Documentation
+
+| Document | Covers |
 |---|---|
-| `sisyphus` | Ultraworker |
-| `hephaestus` | Deep Agent |
-| `prometheus` | Plan Builder |
-| `atlas` | Plan Executor |
-| `metis` | Plan Consultant |
-| `momus` | Plan Critic |
-| `oracle` | Architecture / Reasoning |
-| `librarian` | Research |
-| `explore` | Repository Exploration |
-| `multimodal-looker` | Multimodal Analysis |
-| `sisyphus-junior` | Specialized Execution Worker |
-| `tester` | Test Author |
-| `debugger` | Defect Investigator |
-| `security` | Security Reviewer |
+| [docs/configuration.md](docs/configuration.md) | Every setting, default and effect |
+| [docs/tool-contract.md](docs/tool-contract.md) | Background dispatch, session scope, claim boundary |
+| [docs/task-graphs.md](docs/task-graphs.md) | Graph scheduling, rejection, watchdog, review cycles |
+| [docs/model-chains.md](docs/model-chains.md) | Fallback walk, budgets, hop telemetry |
+| [docs/status-message.md](docs/status-message.md) | Render, delivery, pinning, activity line, events |
+| [docs/live-transcript.md](docs/live-transcript.md) | JSONL shape, kinds, readers, retention |
+| [docs/architecture.md](docs/architecture.md) | Launch path, design decisions, worker contract |
+| [docs/jev.md](docs/jev.md) | Packs, envelope, shadow calibration, authoritative routing |
+| [docs/containment-audit.md](docs/containment-audit.md) | Every chat-emitting path during a run |
+| [docs/omo-slim-mechanism-inventory.md](docs/omo-slim-mechanism-inventory.md) | Mechanism inventory against pinned upstream behaviour |
 
-Categories — `quick`, `deep`, `ultrabrain`, `visual-engineering`, `writing` — spawn the execution worker with a category-specific chain.
+## Security
 
-## How it works
+| Surface | Behaviour |
+|---|---|
+| Writes | `state_path` (`~/.omo/runs.json`), `~/.omo/live/`, and with shadow on, `~/.omo/jev-shadow.jsonl` |
+| Profile reads | `profiles/<agent>/state.db`, to resolve the activity line and detect a stalled child |
+| Network | model calls go through the host's routing and credentials; the only direct call is TypeSafe Jev, and only when `jev_ask` is called, shadow is on, or authoritative routing is enabled |
+| Credentials | provider keys never touch the plugin; `TYPESAFE_AI_API_KEY` is read from the environment at call time and never logged |
+| Chat | the live status message is the only chat writer; workers have no user channel at all |
+| Command authority | workers inherit the parent's toolsets and run non-interactive; dangerous commands are refused by the host's approval path |
 
-Every worker is launched through the host's subagent lifecycle, so it inherits the host's session record, event stream, transcripts, tool scoping and provider routing. The plugin supplies what the host does not: the roster, per-agent model chains with an owned fallback state machine, a task-graph scheduler, and a run tree the host can print.
+No telemetry, no phone-home.
 
-A few decisions are worth knowing because they are not obvious:
+## Limits
 
-- **Per-agent model, not provider.** The host's launch carries `model` only and derives the provider itself. Per-agent fallback is not native either, so it is owned here — a retryable classifier plus a cooldown/restore state machine in `orchestrator/chains.py`.
-- **Personas are delivered, not assumed.** A worker's `agents/<name>.md` goes into its launch `context`, wrapped in an authoritative binding preamble, so the definition actually reaches the model rather than sitting in the repo unread. The host caps a launch's context at 32,000 chars, which every persona fits whole except `sisyphus`, which is truncated with a pointer to the full text. Every persona is also registered as a plugin skill — `skill_view("omo:<name>")` — so the complete definition is always retrievable.
-- **No per-agent permission tier.** Hermes derives a child's capabilities from its parent and refuses a launch whose toolsets are not a subset of the parent's. An earlier read-only tier could not be expressed that way, and the `pre_tool_call` guard that stood in for it never fired — it was keyed on a `session_id` the host does not send. It has been removed rather than repaired: every agent runs with the parent's capabilities, and the roster carries no permission field to mislead.
-- **The registry is on disk, not in memory.** Every run keeps a record: created, then written again at each worker's terminal state. A restart adopts that record and names what it cannot stand behind — a worker that was still running reads `INTERRUPTED`, with the work it was doing marked unverified. What it does not do is resume: the process is gone, so the caller checks the worktree, branch or PR before re-dispatching the same work.
-- **Worker approvals.** Subagent worker threads run non-interactive and refuse dangerous commands by default; ordinary work — files, tests, builds, git — is unaffected.
-- **Registration is unconditional.** `register_tool` is required and fails loudly if the host lacks it; `register_command`, `register_skill` and `on_unload` are each attempted on their own, so a host missing one still gets the others. Nothing branches on a host attribute's presence: an attribute that exists but does nothing would send the whole path down a branch that registers nothing while the plugin still reports as enabled.
+- **Pinning is Discord-only** and needs **Manage Messages**; otherwise it degrades to a logged no-op.
+- **The activity line is approximate under concurrency** — a worker maps to its agent profile's newest session at launch.
+- **No resume.** A restart reports a running worker `INTERRUPTED` and does not continue its work.
+- **Worker output is a claim.** `claim_boundary` separates what the engine observed from what the worker wrote about itself.
+- **Stall detection needs evidence.** Without a readable store, only the hard timeout bounds a child.
 
-## Relationship to oh-my-openagent
+## Troubleshooting
 
-This plugin is an adaptation of [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) (formerly oh-my-opencode) for Hermes.
-
-- **Reused:** the agent roster and personas, and the category routing model.
-- **Replaced:** OMO's runtime coupling. OMO ships as an OpenCode plugin — OpenCode and Bun, the `@opencode-ai` SDK, an `opencode.json` plugin entry, its lifecycle hooks and its `omo.jsonc` config surface. Here the host's own plugin, delegation and config primitives stand in for all of it, so the same roster runs with nothing extra to install.
-- **Not affiliated:** this is an independent, unofficial adaptation and is not produced or endorsed by OMO's authors.
+| Symptom | Cause and fix |
+|---|---|
+| Tree stays flat, orchestrator "cannot delegate" | `delegation.max_spawn_depth` is still at its default — raise it |
+| Tools missing after install | the plugin is not in `plugins.enabled`, or Hermes was not restarted |
+| An agent is refused | it is not in `enabled_agents`; the error names the enabled ones |
+| Status message posts but never pins | the bot lacks **Manage Messages** (403 / 50013, logged and skipped) |
+| OMO Runs tab is empty | no run dispatched yet, or `live_transcript_dir` moved the writer off the directory the tab reads |
+| `jev_ask` returns `unavailable` | key unset, `jev_enabled: false`, or a timeout; deterministic defaults are returned |
 
 ## Development
 
@@ -625,6 +177,14 @@ python3 -m venv .venv && ./.venv/bin/pip install pytest ruff
 ```
 
 CI runs the suite, both ruff gates, and a guard that fails if a persona prompt still carries an unresolved template token.
+
+## Relationship to oh-my-openagent
+
+This plugin is an adaptation of [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent) (formerly oh-my-opencode) for Hermes.
+
+- **Reused:** the agent roster, personas, and the category routing model.
+- **Replaced:** OMO's runtime coupling — OpenCode, Bun, the `@opencode-ai` SDK, `opencode.json`, its lifecycle hooks and `omo.jsonc`. The host's own plugin, delegation and config primitives stand in.
+- **Not affiliated:** an independent, unofficial adaptation, not produced or endorsed by OMO's authors.
 
 ## Attribution
 
