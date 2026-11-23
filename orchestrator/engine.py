@@ -608,27 +608,54 @@ class OmoEngine:
     def _resolve_dispatch_target(
         self, *, goal: str, target: str | None, category: str | None, parent_agent: str | None
     ) -> tuple[str, tuple[str, ...], str]:
-        """Resolve the dispatch target and who chose it: Jev's pick or the caller's.
+        """Resolve the dispatch target and who chose it: the coordinator, Jev's pick, or the caller's.
+
+        A dispatch that names nobody used to land on the static default chain with no
+        coordinator in the loop, so the first hop of that case is now the configured
+        ``coordinator_agent``, announced as ``coordinator``. That rule runs before
+        ``jev_routing_enabled``: the flag only covers the unnamed dispatch when no
+        coordinator is configured, so a setting that is not about the coordinator can
+        never displace it.
+
+        An explicit ``agent=``/``category=`` is never second-guessed, not by the
+        coordinator either. A caller that named one has already decided, and forcing a
+        coordinator over it makes targeted work impossible — every "review this diff"
+        would become another round of delegation, each round spending the very budget
+        the targeted dispatch existed to save.
+
+        The coordinator's own unnamed dispatch is Jev's to place, under the same
+        ``jev_routing_threshold`` as ``target="auto"``, announced as ``jev``. No
+        confident pick is a ``GuardError`` rather than a default lane: a worker sent on
+        an unconfident fit burns its whole budget, and unlike the caller the coordinator
+        can always name an agent or category itself. The coordinator is kept out of the
+        candidates Jev is scored against, and a pick that names it anyway counts as no
+        pick, so a coordinator cannot route itself into delegating to itself.
 
         ``target="auto"`` asks for a routed choice on purpose — the caller has no
-        specialist in mind and wants Jev's — and works without the global flag. The
-        flag (``jev_routing_enabled``) instead covers the unnamed dispatch, and an
-        explicit ``agent=``/``category=`` is never second-guessed: a caller that named
-        one has already decided, which is why routing only ever fills the
-        otherwise-unroutable case. A pick that does not clear ``jev_routing_threshold``
-        is not acted on, and every outcome is announced so a lane is never routed on a
-        fit nobody was sure about.
+        specialist in mind and wants Jev's — and works without either setting. A pick
+        that does not clear the threshold is not acted on, and every outcome is
+        announced so a lane is never routed on a fit nobody was sure about.
         """
         wants_auto = str(target or "").strip().lower() == "auto" or str(category or "").strip().lower() == "auto"
         if wants_auto:
             target = None
             category = None
-        if not wants_auto and not bool(self._config("jev_routing_enabled", False)):
-            name, chain = self._resolve_target(target=target, category=category, parent_agent=parent_agent)
-            return name, chain, "caller"
+        coordinator = str(self._config("coordinator_agent", None) or "").strip()
         if not wants_auto and (target is not None or category is not None):
             name, chain = self._resolve_target(target=target, category=category, parent_agent=parent_agent)
-            self._emit_route("static", 0.0, name, "explicit")
+            # Silent only when nothing routes: an explicit target under a coordinator
+            # still announces, so every lane in a routed setup is accounted for.
+            if coordinator or bool(self._config("jev_routing_enabled", False)):
+                self._emit_route("static", 0.0, name, "explicit")
+            return name, chain, "caller"
+        if coordinator:
+            if parent_agent == coordinator:
+                return self._coordinator_second_hop(goal=goal, coordinator=coordinator, parent_agent=parent_agent)
+            name, chain = self._resolve_coordinator(coordinator)
+            self._emit_route("coordinator", 0.0, name, "configured")
+            return name, chain, "coordinator"
+        if not wants_auto and not bool(self._config("jev_routing_enabled", False)):
+            name, chain = self._resolve_target(target=target, category=category, parent_agent=parent_agent)
             return name, chain, "caller"
         pick, confidence, status = self._jev_pick(goal)
         if pick is not None:
@@ -650,11 +677,52 @@ class OmoEngine:
         name, chain = self._resolve_target(target=target, category=category, parent_agent=parent_agent)
         return name, chain, "caller"
 
-    def _jev_pick(self, goal: str) -> tuple[str | None, float, str]:
+    def _resolve_coordinator(self, coordinator: str) -> tuple[str, tuple[str, ...]]:
+        """Resolve the configured coordinator to a launchable agent, or say why not.
+
+        A ``coordinator_agent`` that does not resolve is a misconfiguration, and it is
+        reported as one: quietly falling back to the default lane would hide a setting
+        the operator believes is routing their dispatches.
+        """
+        try:
+            return self._resolve_target(target=coordinator, category=None, parent_agent=None)
+        except GuardError as exc:
+            raise GuardError(f"coordinator_agent '{coordinator}' is not a usable target: {exc}") from exc
+
+    def _coordinator_second_hop(
+        self, *, goal: str, coordinator: str, parent_agent: str | None
+    ) -> tuple[str, tuple[str, ...], str]:
+        """Place the coordinator's own dispatch: Jev names the specialist, or nothing does.
+
+        The coordinator is excluded from the candidates Jev scores, and a pick that
+        names it anyway is treated as no pick — either way the delegation loop cannot
+        be routed into. Both failures end in the same ``GuardError`` because the
+        coordinator can name the specialist itself; a default lane here is exactly the
+        shape that spends a worker's whole budget on work nobody chose.
+        """
+        pick, confidence, status = self._jev_pick(goal, exclude=frozenset({coordinator}))
+        if pick is not None and pick != coordinator:
+            try:
+                name, chain = self._resolve_target(target=pick, category=None, parent_agent=parent_agent)
+            except Exception:
+                pass
+            else:
+                self._emit_route("jev", confidence, name, status)
+                return name, chain, "jev"
+        self._emit_route("jev-low-confidence" if status == "ok" else "jev-unavailable", confidence, None, status)
+        raise GuardError(
+            f"No confident specialist for this dispatch (coordinator '{coordinator}'). "
+            "Name an agent= or category= instead."
+        )
+
+    def _jev_pick(self, goal: str, *, exclude: frozenset[str] | None = None) -> tuple[str | None, float, str]:
         """One synchronous, bounded ``pick_agent`` call for authoritative routing.
 
         Fail-open: a broken import, a missing key, a timeout, or any error returns
-        ``(None, 0.0, ...)`` so the caller keeps its static target.
+        ``(None, 0.0, ...)`` so the caller keeps its static target. ``exclude`` removes
+        names from the candidate map before Jev ever scores them, which is how the
+        coordinator is kept out of its own second hop: a name Jev never sees cannot be
+        the pick.
         """
         try:
             from jev.packs import agent_candidates
@@ -681,7 +749,14 @@ class OmoEngine:
                     # so we proceed with an empty unavailable set (everything appears live).
                     pass
 
-            candidates = agent_candidates(self._enabled_agents(), unavailable=unavailable)
+            enabled = self._enabled_agents()
+            if exclude:
+                from roster import AGENTS
+
+                # A coordinator Jev can see is a coordinator Jev can name in its own
+                # second hop, so it leaves the option set before Jev scores anything.
+                enabled = (enabled if enabled is not None else set(AGENTS)) - set(exclude)
+            candidates = agent_candidates(enabled, unavailable=unavailable)
             return route_agent(
                 state={"user_message": goal},
                 valid_targets=set(candidates),
