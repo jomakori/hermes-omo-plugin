@@ -219,16 +219,22 @@ def make_omo_handler(engine: Any) -> Callable[..., Any]:
                     )
                 except GuardError as exc:
                     return render({"error": str(exc), "rejected": True})
-            return render(
-                engine.dispatch(
-                    goal=goal,
-                    target=params.get("agent"),
-                    category=params.get("category"),
-                    context=params.get("context"),
-                    background=bool(params.get("background", False)),
-                    title=params.get("title"),
+            try:
+                return render(
+                    engine.dispatch(
+                        goal=goal,
+                        target=params.get("agent"),
+                        category=params.get("category"),
+                        context=params.get("context"),
+                        background=bool(params.get("background", False)),
+                        title=params.get("title"),
+                    )
                 )
-            )
+            except GuardError as exc:
+                # Same contract as the graph paths above: a rejected dispatch is a
+                # caller error the model can fix, not a tool crash. The coordinator's
+                # second hop is the one refusal only a plain dispatch can reach.
+                return render({"error": str(exc), "rejected": True})
         if action == "status":
             return _render_status(
                 engine.status(params.get("run_id"), all_sessions=bool(params.get("all_sessions", False)))
