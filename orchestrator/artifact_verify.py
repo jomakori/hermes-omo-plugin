@@ -20,7 +20,6 @@ what to do about an unverified claim stays with the reader.
 from __future__ import annotations
 
 import os
-import pathlib
 import re
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -159,7 +158,20 @@ _BRANCH_PREFIXES = (
     "release",
 )
 _BRANCH = re.compile(r"\b(?:" + "|".join(_BRANCH_PREFIXES) + r")/[A-Za-z0-9._\-/]+")
-_SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
+
+# A hex token alone never proves a commit was made in THIS repo: a worker's
+# prose routinely cites another project's SHA, or any other hex-looking word.
+# A short run (7-39 hex chars) only becomes a commit claim when context
+# removes the ambiguity: a full 40-char SHA is unambiguous by length alone;
+# `owner/repo@sha` or a `/commit/<sha>` URL names the repo the claim belongs
+# to; explicit commit wording in the same clause says the worker means its
+# own commit, not a citation of someone else's.
+_SHA_FULL = re.compile(r"\b[0-9a-f]{40}\b")
+_SHA_SHORT = re.compile(r"\b[0-9a-f]{7,39}\b")
+_COMMIT_URL = re.compile(r"github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/commit/([0-9a-f]{7,40})\b")
+_REPO_AT_SHA = re.compile(r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{7,40})\b")
+_COMMIT_WORDING = re.compile(r"\b(?:commit|committed|sha|merged\s+as|pushed\s+as)\b", re.IGNORECASE)
+_CLAUSE_SPLIT = re.compile(r"[.;:\n]+")
 _TRAILING = "`.,;:!?)]}>'\"*"
 
 _KIND_BY_KEY = {
@@ -284,8 +296,14 @@ def _claims_from_mapping(artifacts: Mapping[str, Any]) -> list[Claim]:
 def _claims_from_text(summary: str) -> list[Claim]:
     """Claims read out of a worker's prose, PR URLs first.
 
-    PR URL spans are removed before the branch and SHA passes so a URL's own
-    path cannot be re-read as a second, bogus claim.
+    A hex token alone is never a commit claim — see the module note above
+    ``_SHA_FULL``. It becomes one only when (a) it is a full 40-char SHA,
+    (b) it is repo-qualified (``owner/repo@sha`` or a ``.../commit/<sha>``
+    URL, in which case the ``Claim`` carries that repo), or (c) explicit
+    commit wording (``commit``, ``committed``, ``sha``, ``merged as``,
+    ``pushed as``) appears in the same clause. Every matched span is removed
+    from the remainder before the next pass so a URL's or a repo-qualified
+    mention's own path cannot be re-read as a second, bogus claim.
     """
     text = summary or ""
     claims: list[Claim] = []
@@ -293,14 +311,37 @@ def _claims_from_text(summary: str) -> list[Claim]:
         owner, name, number = match.groups()
         claims.append(Claim(kind=KIND_PR, value=f"{owner}/{name}#{number}", repo=f"{owner}/{name}"))
     remainder = _PR_URL.sub(" ", text)
+
+    for match in _COMMIT_URL.finditer(remainder):
+        owner, name, sha = match.groups()
+        claims.append(Claim(kind=KIND_COMMIT, value=sha, repo=f"{owner}/{name}"))
+    remainder = _COMMIT_URL.sub(" ", remainder)
+
+    for match in _REPO_AT_SHA.finditer(remainder):
+        repo, sha = match.groups()
+        claims.append(Claim(kind=KIND_COMMIT, value=sha, repo=repo))
+    remainder = _REPO_AT_SHA.sub(" ", remainder)
+
     for match in _BRANCH.finditer(remainder):
         branch = _clean(match.group(0))
         if branch and not _looks_like_file_path(branch):
             claims.append(Claim(kind=KIND_BRANCH, value=branch))
     remainder = _BRANCH.sub(" ", remainder)
-    for token in _SHA.findall(remainder):
-        if _looks_like_sha(token):
-            claims.append(Claim(kind=KIND_COMMIT, value=token))
+
+    # (a) a full 40-char hex run is unambiguous by length alone.
+    for token in _SHA_FULL.findall(remainder):
+        claims.append(Claim(kind=KIND_COMMIT, value=token))
+    remainder = _SHA_FULL.sub(" ", remainder)
+
+    # (c) a short hex run is a claim only inside a clause that also uses
+    # explicit commit wording — a bare token, or one cited for some other
+    # reason (another project's SHA, a hash, a checksum), is not.
+    for clause in _CLAUSE_SPLIT.split(remainder):
+        if not _COMMIT_WORDING.search(clause):
+            continue
+        for token in _SHA_SHORT.findall(clause):
+            if _looks_like_sha(token):
+                claims.append(Claim(kind=KIND_COMMIT, value=token))
     return claims
 
 
@@ -419,22 +460,6 @@ def verification_for(result: Any, verifier: ArtifactVerifier) -> dict[str, Any]:
 # -------------------------------------------------------- the real verifier
 
 
-def _repo_root(start: str | pathlib.Path | None = None) -> str | None:
-    """The nearest directory at or above ``start`` that is a git work tree.
-
-    The verifier used to subprocess git in whatever cwd the gateway inherited.
-    Outside a checkout git answers ``fatal: not a git repository``, which the
-    gate classifies as "could not check" -- correct, but it also means a real
-    claim can never be confirmed. Resolving the checkout from this module's own
-    location gives git a repository it can actually answer from.
-    """
-    here = pathlib.Path(start or __file__).resolve()
-    for candidate in (here, *here.parents):
-        if (candidate / ".git").exists():
-            return str(candidate)
-    return None
-
-
 def _token(override: str | None = None) -> str:
     """The GitHub token this host already exports, preferring an explicit one.
 
@@ -476,7 +501,9 @@ class SubprocessVerifier:
     - branch: ``git ls-remote --heads <remote> <branch>`` — empty output is the
       remote saying the ref is not there, which is the claim being tested.
     - PR: ``gh pr view <n> --repo <o>/<r> --json state,url``.
-    - commit: ``git cat-file -e <sha>``.
+    - commit: the claim's own repo via ``gh api repos/<repo>/commits/<sha>``
+      when one is named, else local ``git cat-file -e <sha>`` in an explicit
+      workspace, else not checked at all.
 
     ``runner`` is injectable so the command construction can be tested without
     a subprocess; nothing here retries, because a verification is a
@@ -493,7 +520,7 @@ class SubprocessVerifier:
     def _exec(self, command: Sequence[str], env: Mapping[str, str] | None = None) -> tuple[int, str]:
         if self.runner is not None:
             return self.runner(command)
-        return _run(command, self.cwd or _repo_root(), self.timeout_s, env)
+        return _run(command, self.cwd, self.timeout_s, env)
 
     def _gh(self, command: Sequence[str]) -> tuple[int, str]:
         """Run gh with the host's own token, so a missing login is not a missing artifact."""
@@ -527,6 +554,15 @@ class SubprocessVerifier:
             if _forge_says_absent(output):
                 return Verdict(claim.value, claim.kind, False, f"branch {claim.value} is not on {claim.repo}")
             return Verdict(claim.value, claim.kind, False, f"{COULD_NOT_CHECK}: gh api failed: {output.strip()}")
+        if not self.cwd:
+            # Asking a branch's existence of an inherited cwd means asking the
+            # plugin's own checkout, which is never the run's repository.
+            return Verdict(
+                claim.value,
+                claim.kind,
+                False,
+                f"{COULD_NOT_CHECK}: no repository was named and no workspace was given to check {claim.value} against",
+            )
         code, output = self._exec(["git", "ls-remote", "--heads", self.remote, claim.value])
         if code != 0:
             return Verdict(claim.value, claim.kind, False, f"{COULD_NOT_CHECK}: git ls-remote failed: {output.strip()}")
@@ -546,19 +582,26 @@ class SubprocessVerifier:
         return Verdict(claim.value, claim.kind, True, "")
 
     def _commit(self, claim: Claim) -> Verdict:
-        code, output = self._exec(["git", "cat-file", "-e", claim.value])
-        if code == 0:
-            return Verdict(claim.value, claim.kind, True, "")
-        if _local_env_failure(output):
-            # The check could not run here (no clone in this cwd). That is the
-            # host's tooling failing, never evidence the commit is absent.
-            if claim.repo:
-                return self._commit_via_forge(claim)
+        # A named repo settles the question on its own ground; the local
+        # checkout (if any) is never the right place to ask about another repo.
+        if claim.repo:
+            return self._commit_via_forge(claim)
+        if not self.cwd:
             return Verdict(
                 claim.value,
                 claim.kind,
                 False,
-                f"{COULD_NOT_CHECK}: git could not be run from {self.cwd or 'the inherited cwd'}: {output.strip()}",
+                f"{COULD_NOT_CHECK}: no repository was named and no workspace was given to check {claim.value} against",
+            )
+        code, output = self._exec(["git", "cat-file", "-e", claim.value])
+        if code == 0:
+            return Verdict(claim.value, claim.kind, True, "")
+        if _local_env_failure(output):
+            return Verdict(
+                claim.value,
+                claim.kind,
+                False,
+                f"{COULD_NOT_CHECK}: git could not be run from {self.cwd}: {output.strip()}",
             )
         return Verdict(claim.value, claim.kind, False, f"commit {claim.value} is not a valid object: {output.strip()}")
 
@@ -571,5 +614,11 @@ class SubprocessVerifier:
         return Verdict(claim.value, claim.kind, False, f"{COULD_NOT_CHECK}: gh api failed: {output.strip()}")
 
 
-def default_verifier() -> SubprocessVerifier:
-    return SubprocessVerifier()
+def default_verifier(workspace: str | None = None) -> SubprocessVerifier:
+    """The verifier the engine uses, pinned to the workspace the run owns.
+
+    Without a workspace git would answer from the plugin's own checkout, so a
+    claim about the run's repository would be settled against the wrong repo --
+    confidently, and wrongly.
+    """
+    return SubprocessVerifier(cwd=workspace)

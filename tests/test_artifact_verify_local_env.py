@@ -64,7 +64,11 @@ def test_the_same_commit_is_verified_through_the_forge_when_a_repo_is_named():
 
 def test_a_genuinely_absent_commit_still_reads_as_missing():
     verifier = SubprocessVerifier(
-        runner=runner_answering(git_output="fatal: Not a valid object name 022eafa", gh_output="")
+        runner=runner_answering(
+            git_output="fatal: Not a valid object name 022eafa",
+            gh_output="gh: Not Found (HTTP 404)",
+            gh_code=1,
+        )
     )
     verdict = verifier(Claim(KIND_COMMIT, "022eafa", repo="jomakori/openkite"))
 
@@ -108,7 +112,11 @@ def test_an_unverifiable_commit_never_demotes_a_succeeded_run():
 
 def test_a_confirmed_absence_still_demotes_a_succeeded_run():
     verifier = SubprocessVerifier(
-        runner=runner_answering(git_output="fatal: Not a valid object name 022eafa", gh_output="")
+        runner=runner_answering(
+            git_output="fatal: Not a valid object name 022eafa",
+            gh_output="gh: Not Found (HTTP 404)",
+            gh_code=1,
+        )
     )
     verification = {
         "verifiable": True,

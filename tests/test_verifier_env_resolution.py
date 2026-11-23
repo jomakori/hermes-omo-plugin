@@ -56,23 +56,27 @@ def _recording_run(monkeypatch, *, code=0, output=""):
     return calls
 
 
-def test_git_runs_in_a_resolved_checkout_not_the_inherited_cwd(monkeypatch):
-    """The old code passed cwd=None; git then ran at /opt and answered NON_REPO."""
+def test_git_runs_in_the_workspace_the_verifier_was_given(monkeypatch):
+    """A workspace is the only cwd git may be handed; nothing is inherited."""
     _no_tokens(monkeypatch)
     calls = _recording_run(monkeypatch, output="")
-    SubprocessVerifier()(Claim(KIND_COMMIT, "022eafa"))
+    SubprocessVerifier(cwd=str(_REPO_ROOT))(Claim(KIND_COMMIT, "022eafa"))
 
     assert calls, "no subprocess was made"
-    cwd = calls[0]["cwd"]
-    assert cwd is not None
-    assert (pathlib.Path(cwd) / ".git").exists(), cwd
+    assert calls[0]["cwd"] == str(_REPO_ROOT)
 
 
-def test_the_resolved_checkout_is_the_plugins_own_tree():
-    root = artifact_verify._repo_root()
+def test_a_claim_with_no_workspace_never_reaches_the_plugins_own_tree(monkeypatch):
+    """The plugin's checkout is never the run's repository, so it is never asked."""
+    _no_tokens(monkeypatch)
+    calls = _recording_run(monkeypatch, output="")
 
-    assert root is not None
-    assert pathlib.Path(root).resolve() == _REPO_ROOT
+    verdict = SubprocessVerifier()(Claim(KIND_COMMIT, "022eafa"))
+
+    assert calls == [], calls
+    assert verdict.exists is False
+    assert COULD_NOT_CHECK in verdict.detail
+    assert not hasattr(artifact_verify, "_repo_root"), "a __file__-derived repo root must not come back"
 
 
 def test_gh_runs_with_the_token_the_host_already_exports(monkeypatch):
