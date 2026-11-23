@@ -20,7 +20,6 @@ what to do about an unverified claim stays with the reader.
 from __future__ import annotations
 
 import os
-import pathlib
 import re
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -461,22 +460,6 @@ def verification_for(result: Any, verifier: ArtifactVerifier) -> dict[str, Any]:
 # -------------------------------------------------------- the real verifier
 
 
-def _repo_root(start: str | pathlib.Path | None = None) -> str | None:
-    """The nearest directory at or above ``start`` that is a git work tree.
-
-    The verifier used to subprocess git in whatever cwd the gateway inherited.
-    Outside a checkout git answers ``fatal: not a git repository``, which the
-    gate classifies as "could not check" -- correct, but it also means a real
-    claim can never be confirmed. Resolving the checkout from this module's own
-    location gives git a repository it can actually answer from.
-    """
-    here = pathlib.Path(start or __file__).resolve()
-    for candidate in (here, *here.parents):
-        if (candidate / ".git").exists():
-            return str(candidate)
-    return None
-
-
 def _token(override: str | None = None) -> str:
     """The GitHub token this host already exports, preferring an explicit one.
 
@@ -518,7 +501,9 @@ class SubprocessVerifier:
     - branch: ``git ls-remote --heads <remote> <branch>`` — empty output is the
       remote saying the ref is not there, which is the claim being tested.
     - PR: ``gh pr view <n> --repo <o>/<r> --json state,url``.
-    - commit: ``git cat-file -e <sha>``.
+    - commit: the claim's own repo via ``gh api repos/<repo>/commits/<sha>``
+      when one is named, else local ``git cat-file -e <sha>`` in an explicit
+      workspace, else not checked at all.
 
     ``runner`` is injectable so the command construction can be tested without
     a subprocess; nothing here retries, because a verification is a
@@ -535,7 +520,7 @@ class SubprocessVerifier:
     def _exec(self, command: Sequence[str], env: Mapping[str, str] | None = None) -> tuple[int, str]:
         if self.runner is not None:
             return self.runner(command)
-        return _run(command, self.cwd or _repo_root(), self.timeout_s, env)
+        return _run(command, self.cwd, self.timeout_s, env)
 
     def _gh(self, command: Sequence[str]) -> tuple[int, str]:
         """Run gh with the host's own token, so a missing login is not a missing artifact."""
@@ -569,6 +554,15 @@ class SubprocessVerifier:
             if _forge_says_absent(output):
                 return Verdict(claim.value, claim.kind, False, f"branch {claim.value} is not on {claim.repo}")
             return Verdict(claim.value, claim.kind, False, f"{COULD_NOT_CHECK}: gh api failed: {output.strip()}")
+        if not self.cwd:
+            # Asking a branch's existence of an inherited cwd means asking the
+            # plugin's own checkout, which is never the run's repository.
+            return Verdict(
+                claim.value,
+                claim.kind,
+                False,
+                f"{COULD_NOT_CHECK}: no repository was named and no workspace was given to check {claim.value} against",
+            )
         code, output = self._exec(["git", "ls-remote", "--heads", self.remote, claim.value])
         if code != 0:
             return Verdict(claim.value, claim.kind, False, f"{COULD_NOT_CHECK}: git ls-remote failed: {output.strip()}")
@@ -588,19 +582,26 @@ class SubprocessVerifier:
         return Verdict(claim.value, claim.kind, True, "")
 
     def _commit(self, claim: Claim) -> Verdict:
-        code, output = self._exec(["git", "cat-file", "-e", claim.value])
-        if code == 0:
-            return Verdict(claim.value, claim.kind, True, "")
-        if _local_env_failure(output):
-            # The check could not run here (no clone in this cwd). That is the
-            # host's tooling failing, never evidence the commit is absent.
-            if claim.repo:
-                return self._commit_via_forge(claim)
+        # A named repo settles the question on its own ground; the local
+        # checkout (if any) is never the right place to ask about another repo.
+        if claim.repo:
+            return self._commit_via_forge(claim)
+        if not self.cwd:
             return Verdict(
                 claim.value,
                 claim.kind,
                 False,
-                f"{COULD_NOT_CHECK}: git could not be run from {self.cwd or 'the inherited cwd'}: {output.strip()}",
+                f"{COULD_NOT_CHECK}: no repository was named and no workspace was given to check {claim.value} against",
+            )
+        code, output = self._exec(["git", "cat-file", "-e", claim.value])
+        if code == 0:
+            return Verdict(claim.value, claim.kind, True, "")
+        if _local_env_failure(output):
+            return Verdict(
+                claim.value,
+                claim.kind,
+                False,
+                f"{COULD_NOT_CHECK}: git could not be run from {self.cwd}: {output.strip()}",
             )
         return Verdict(claim.value, claim.kind, False, f"commit {claim.value} is not a valid object: {output.strip()}")
 
@@ -613,5 +614,11 @@ class SubprocessVerifier:
         return Verdict(claim.value, claim.kind, False, f"{COULD_NOT_CHECK}: gh api failed: {output.strip()}")
 
 
-def default_verifier() -> SubprocessVerifier:
-    return SubprocessVerifier()
+def default_verifier(workspace: str | None = None) -> SubprocessVerifier:
+    """The verifier the engine uses, pinned to the workspace the run owns.
+
+    Without a workspace git would answer from the plugin's own checkout, so a
+    claim about the run's repository would be settled against the wrong repo --
+    confidently, and wrongly.
+    """
+    return SubprocessVerifier(cwd=workspace)

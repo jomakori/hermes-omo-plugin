@@ -23,6 +23,7 @@ from orchestrator.artifact_verify import (  # noqa: E402
     Claim,
     SubprocessVerifier,
     Verdict,
+    default_verifier,
     extract_claims,
     verification_for,
 )
@@ -263,7 +264,7 @@ def test_the_subprocess_verifier_asks_git_and_gh_the_narrow_question():
             return 0, "deadbee\trefs/heads/feat/x\n"
         return 0, '{"state":"OPEN","url":"https://github.com/o/r/pull/9"}'
 
-    verifier = SubprocessVerifier(remote="origin", runner=runner)
+    verifier = SubprocessVerifier(remote="origin", cwd="/app/repo", runner=runner)
 
     assert verifier(Claim(kind=KIND_BRANCH, value="feat/x")).exists is True
     assert verifier(Claim(kind=KIND_PR, value="o/r#9", repo="o/r")).exists is True
@@ -277,14 +278,14 @@ def test_the_subprocess_verifier_asks_git_and_gh_the_narrow_question():
 
 
 def test_an_empty_ls_remote_is_the_remote_saying_the_branch_is_absent():
-    verifier = SubprocessVerifier(runner=lambda command: (0, "\n"))
+    verifier = SubprocessVerifier(cwd="/app/repo", runner=lambda command: (0, "\n"))
     verdict = verifier(Claim(kind=KIND_BRANCH, value="feat/ghost"))
     assert verdict.exists is False
     assert "not on origin" in verdict.detail
 
 
 def test_a_failing_git_is_could_not_check_not_a_missing_branch():
-    verifier = SubprocessVerifier(runner=lambda command: (128, "fatal: no remote"))
+    verifier = SubprocessVerifier(cwd="/app/repo", runner=lambda command: (128, "fatal: no remote"))
     verdict = verifier(Claim(kind=KIND_BRANCH, value="feat/x"))
     assert verdict.exists is False
     assert COULD_NOT_CHECK in verdict.detail
@@ -447,3 +448,70 @@ def test_the_background_path_verifies_too():
 
     row = engine.status(out["run_id"])["workers"][0]
     assert row["result"]["verified"] is False
+
+
+# --------------------------------------- resolving a claim in the right repo
+#
+# Regression: SubprocessVerifier() was built with no cwd, so _exec() fell back
+# to _repo_root(), which climbs from this module's own __file__ and therefore
+# always found the plugin's checkout. Repo-less claims were then answered by
+# the wrong repository, and "not a valid object" read as evidence of absence --
+# which demoted workers whose commit lived in the repo they had just worked in.
+
+
+def test_a_repo_qualified_commit_is_asked_of_the_forge_never_a_local_checkout():
+    seen: list[list[str]] = []
+
+    def runner(command):
+        seen.append(list(command))
+        return 0, "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0\n"
+
+    sha = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"
+    verdict = SubprocessVerifier(runner=runner)(Claim(kind=KIND_COMMIT, value=sha, repo="jomakori/hermes-omo-plugin"))
+
+    assert verdict.exists is True
+    assert seen == [["gh", "api", f"repos/jomakori/hermes-omo-plugin/commits/{sha}", "--jq", ".sha"]]
+
+
+def test_a_repo_less_commit_with_no_workspace_is_could_not_check_not_absent():
+    def runner(command):  # pragma: no cover - must never be reached
+        raise AssertionError(f"git must not be asked: {command}")
+
+    verdict = SubprocessVerifier(runner=runner)(Claim(kind=KIND_COMMIT, value="abc1234"))
+
+    assert verdict.exists is False
+    assert COULD_NOT_CHECK in verdict.detail
+
+
+def test_a_repo_less_branch_with_no_workspace_is_could_not_check_not_absent():
+    def runner(command):  # pragma: no cover - must never be reached
+        raise AssertionError(f"git must not be asked: {command}")
+
+    verdict = SubprocessVerifier(runner=runner)(Claim(kind=KIND_BRANCH, value="feat/x"))
+
+    assert verdict.exists is False
+    assert COULD_NOT_CHECK in verdict.detail
+
+
+def test_a_commit_that_cannot_be_located_keeps_a_succeeded_worker_succeeded():
+    summary = "Landed the fix in commit a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0."
+    verification = verification_for(
+        summary, SubprocessVerifier(runner=lambda command: (1, "fatal: not a git repository"))
+    )
+
+    assert demote_unauthenticated(SUCCEEDED, verification) == SUCCEEDED
+
+
+def test_a_commit_the_named_repo_does_not_have_still_demotes():
+    summary = "Landed it in jomakori/hermes-omo-plugin@a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0."
+    verification = verification_for(summary, SubprocessVerifier(runner=lambda command: (1, "gh: Not Found (HTTP 404)")))
+
+    assert demote_unauthenticated(SUCCEEDED, verification) == UNAUTHENTICATED
+
+
+def test_the_verifier_no_longer_climbs_to_a_repository_root():
+    import orchestrator.artifact_verify as module
+
+    assert not hasattr(module, "_repo_root"), "a __file__-derived repo root must not come back"
+    assert default_verifier().cwd is None
+    assert default_verifier(workspace="/app/repo").cwd == "/app/repo"
