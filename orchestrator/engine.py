@@ -589,6 +589,13 @@ class OmoEngine:
         title: str | None = None,
         origin: str = "",
     ) -> dict[str, Any]:
+        # Who is calling. The tool handlers cannot name their own caller — the
+        # agent name lives on the worker this process launched, not on the call —
+        # so the identity is read off the running turn here. Without it no
+        # dispatch ever looks like it came from the coordinator, which is what
+        # kept the coordinator's second hop unreachable.
+        if parent_agent is None:
+            parent_agent = self._calling_agent_name()
         name, chain, routed_by = self._resolve_dispatch_target(
             goal=goal, target=target, category=category, parent_agent=parent_agent
         )
@@ -667,6 +674,30 @@ class OmoEngine:
             return self._ctx.get_config(key, default)
         except Exception:
             return default
+
+    def _calling_agent_name(self) -> str | None:
+        """The OMO agent whose turn is dispatching, or ``None`` when it is not one of ours.
+
+        The host stamps a delegated child with a subagent id, and this process
+        launched every OMO worker under one — so the caller's id names the worker,
+        and the worker carries the agent name. Read off the live handle rather
+        than ``host_subagent_id``: a retried hop relaunches the child under a fresh
+        id, and the newest handle is the child that is actually calling.
+
+        Fails closed to ``None``: an ordinary chat turn (root agent, no subagent
+        id), a host without the lifecycle bridge, and a child this process did not
+        launch all read as no caller — which is the routing that existed before
+        the identity was threaded, never a guess at who might be calling.
+        """
+        subagent_id = host_bridge.calling_subagent_id()
+        if not subagent_id:
+            return None
+        # Snapshot: a dispatch from another thread can append runs (see _spawn).
+        for run in list(self.runs.values()):
+            for worker in run.workers:
+                if str(getattr(worker.handle, "subagent_id", "") or "") == subagent_id:
+                    return worker.agent_name
+        return None
 
     def _resolve_dispatch_target(
         self, *, goal: str, target: str | None, category: str | None, parent_agent: str | None

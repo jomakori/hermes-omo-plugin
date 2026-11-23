@@ -41,6 +41,25 @@ def _resolve_parent_agent() -> Any:
         return None
 
 
+def calling_subagent_id() -> str:
+    """The host subagent id of the agent whose turn is running this call, or ``""``.
+
+    ``_resolve_parent_agent`` names the agent that owns the current turn — the
+    same agent a dock row is filed under. Read its ``_subagent_id``, which the
+    host stamps on a delegated child at build time, and a tool call can say
+    which agent is calling: the root agent carries none, so a chat-side call
+    reads as no caller rather than as a guess.
+    """
+    agent = _resolve_parent_agent()
+    if agent is None:
+        return ""
+    try:
+        return str(getattr(agent, "_subagent_id", "") or "")
+    except Exception as exc:
+        logger.debug("host_bridge: calling subagent unresolved: %s", exc)
+        return ""
+
+
 class _WorkerShim:
     """Minimal registry-facing stand-in for a worker; never a real AIAgent.
 
@@ -165,4 +184,12 @@ def emit(writer: Any, kind: str, text: str) -> None:
         logger.debug("host_bridge: emit(%s) failed: %s", kind, exc)
 
 
-__all__ = ["emit", "open_writer", "register_row", "unregister_row", "update_fields", "update_status"]
+__all__ = [
+    "calling_subagent_id",
+    "emit",
+    "open_writer",
+    "register_row",
+    "unregister_row",
+    "update_fields",
+    "update_status",
+]

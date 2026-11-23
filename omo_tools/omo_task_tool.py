@@ -4,6 +4,7 @@ from collections.abc import Callable
 from typing import Any
 
 from omo_tools.omo_tool import render
+from orchestrator.guards import GuardError
 
 OMO_TASK_SCHEMA: dict[str, Any] = {
     "name": "omo_task",
@@ -58,16 +59,21 @@ def make_omo_task_handler(engine: Any) -> Callable[..., Any]:
         category = params.get("category")
         if bool(target) == bool(category):
             return render({"error": "Provide exactly one of agent= or category=."})
-        return render(
-            engine.dispatch(
-                goal=prompt,
-                target=target,
-                category=category,
-                context=params.get("context"),
-                background=bool(params.get("background", False)),
-                title=params.get("title"),
+        try:
+            return render(
+                engine.dispatch(
+                    goal=prompt,
+                    target=target,
+                    category=category,
+                    context=params.get("context"),
+                    background=bool(params.get("background", False)),
+                    title=params.get("title"),
+                )
             )
-        )
+        except GuardError as exc:
+            # A refused dispatch is a caller error to render, not a tool crash.
+            # With a live caller identity the lineage guard can newly refuse here.
+            return render({"error": str(exc), "rejected": True})
 
     return handler
 
