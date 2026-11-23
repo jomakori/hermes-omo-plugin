@@ -140,6 +140,13 @@ _TASK_CONTEXT_CLOSE = "\n</task_context>"
 # a thirty-minute worker would otherwise post ninety status edits to say "nothing yet".
 _HEARTBEAT_INTERVAL_SECONDS = 60.0
 
+# How often the periodic orphan sweep re-runs after start (see `_arm_reconcile_timer`).
+# Issue #59 fixed the record going stale once, at start; a process that stays up
+# for hours still needs to notice a sibling's worker going quiet well before the
+# worker_timeout_seconds (1800s) cap, so a dependent is unblocked in about a
+# minute instead of riding that cap out.
+DEFAULT_RECONCILE_SECONDS = 60.0
+
 # The one-line nudge a dispatch payload carries when its run has a live
 # transcript (see orchestrator.live_transcript): named once so every payload
 # that adds it says the same thing.
@@ -252,6 +259,11 @@ class OmoEngine:
         self._request_factory = request_factory
         self._store = store
         self._restored = False
+        # The periodic sweep's own thread/stop-event (see `_arm_reconcile_timer`);
+        # `None` until `_restore` arms it, and stays `None` when `reconcile_seconds`
+        # disables it (tests that want to drive `_reconcile_tick` on their own).
+        self._reconcile_thread: threading.Thread | None = None
+        self._reconcile_stop: threading.Event | None = None
         self._persist_lock = threading.Lock()
         self.chains: Any = None
         self.runs: dict[str, Run] = {}
@@ -341,6 +353,7 @@ class OmoEngine:
         # the live status message and any later dispatch all answer from that dict,
         # so a dead row must already read INTERRUPTED by the time they see it.
         newly_interrupted = self._reconcile_orphans(loaded)
+        self._arm_reconcile_timer()
         adopted = {run_id: run for run_id, run in loaded.items() if run_id not in self.runs}
         if not adopted:
             return
@@ -400,6 +413,56 @@ class OmoEngine:
                     },
                 )
         return settled
+
+    def _reconcile_tick(self) -> None:
+        """Settle whatever died since the last pass, then make that answer the one on disk.
+
+        Same question as the start-of-process reconcile, asked again: liveness is a
+        session hold in this process, so a run whose worker is gone can be found
+        without asking a stored field that a dying process kept writing.
+        """
+        if self._store is None:
+            return
+        loaded = self._store.load()
+        newly_interrupted = self._reconcile_orphans(loaded)
+        if not newly_interrupted:
+            return
+        adopted = {run_id: run for run_id, run in loaded.items() if run_id not in self.runs}
+        self.runs.update(adopted)
+        with self._persist_lock:
+            self._store.save(dict(self.runs))
+        for worker in newly_interrupted:
+            self._maybe_dispatch_self_patch(worker)
+
+    def _reconcile_loop(self, stop: threading.Event, seconds: float) -> None:
+        while not stop.wait(seconds):
+            try:
+                self._reconcile_tick()
+            except Exception as error:  # a sweep must never take the gateway down
+                self._progress("reconcile_failed", {"error": str(error)})
+
+    def _arm_reconcile_timer(self) -> None:
+        """Run the orphan sweep on a timer for as long as this process lives.
+
+        Issue #59 settled the record once, at start. A gateway that stays up for
+        hours never looks again, so a worker that died at minute ten went on reading
+        RUNNING — booking a dispatch slot for work nobody was doing — until the
+        1800s cap released whatever waited on it. A one-minute pass makes the cap
+        the outer limit it was meant to be rather than the notice period.
+        """
+        seconds = float(self._config("reconcile_seconds", DEFAULT_RECONCILE_SECONDS))
+        if seconds <= 0 or self._reconcile_thread is not None:
+            return
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=self._reconcile_loop,
+            args=(stop, seconds),
+            name="omo-reconcile",
+            daemon=True,
+        )
+        self._reconcile_stop = stop
+        self._reconcile_thread = thread
+        thread.start()
 
     @staticmethod
     def _release_if_settled(run: Run) -> None:
