@@ -28,7 +28,7 @@ from orchestrator.artifact_verify import (  # noqa: E402
 )
 from orchestrator.chains import HOP_REASON_UNVERIFIABLE, ChainResolver  # noqa: E402
 from orchestrator.engine import OmoEngine  # noqa: E402
-from orchestrator.models import SUCCEEDED, UNAUTHENTICATED  # noqa: E402
+from orchestrator.models import SUCCEEDED, UNAUTHENTICATED, demote_unauthenticated  # noqa: E402
 
 
 class FakeVerifier:
@@ -106,6 +106,78 @@ def test_a_dotted_release_branch_is_still_claimed_not_mistaken_for_a_file():
     # is still claimed as a branch, same as any other conventional-prefix ref.
     assert extract_claims("cut release/v1.2.3") == [
         Claim(kind=KIND_BRANCH, value="release/v1.2.3"),
+    ]
+
+
+# ---------------------------------------------- narrow commit-claim extraction
+#
+# Regression: a research worker citing an external project's commit, or any
+# other hex-looking word, used to "claim" a commit it never made (_SHA ran
+# over the whole narrative and took any 7-40 char hex run with a digit).
+# SubprocessVerifier._commit() then resolved that token in the WRONG repo and
+# demote_unauthenticated flipped a genuinely SUCCEEDED worker to
+# UNAUTHENTICATED. A hex token is now a commit claim only when it is a full
+# 40-char SHA, repo-qualified, or paired with explicit commit wording in the
+# same clause; see module docstring on ``_claims_from_text``.
+
+
+def test_an_external_projects_commit_citation_is_not_claimed():
+    summary = (
+        "Investigated how kubernetes/kubernetes handles this upstream; "
+        "their fix lands around a1b2c3d9, not something we authored here."
+    )
+    claims = extract_claims(summary)
+    assert [c for c in claims if c.kind == KIND_COMMIT] == []
+
+    verification = verification_for(summary, FakeVerifier())
+    assert demote_unauthenticated(SUCCEEDED, verification) == SUCCEEDED
+
+
+def test_a_bare_hex_token_with_no_commit_wording_is_not_claimed():
+    summary = "The build hash came back a1b2c3d, matching the cached artifact."
+    claims = extract_claims(summary)
+    assert [c for c in claims if c.kind == KIND_COMMIT] == []
+
+    verification = verification_for(summary, FakeVerifier())
+    assert demote_unauthenticated(SUCCEEDED, verification) == SUCCEEDED
+
+
+def test_commit_wording_in_a_different_clause_does_not_reach_a_sha_in_another():
+    # "committed" and the hex token are in different clauses (split on the
+    # period), so the token must not be read as a commit claim.
+    summary = "We committed the plan. See torvalds/linux at a1b2c3d for inspiration."
+    assert [c for c in extract_claims(summary) if c.kind == KIND_COMMIT] == []
+
+
+def test_a_full_forty_char_sha_is_claimed_even_with_no_commit_wording():
+    sha = "a" * 40
+    assert extract_claims(f"Diffed against {sha} upstream.") == [
+        Claim(kind=KIND_COMMIT, value=sha),
+    ]
+
+
+def test_a_repo_qualified_sha_via_at_syntax_is_claimed_with_its_repo():
+    assert extract_claims("Based the patch on jomakori/hermes-omo-plugin@b9f38fa.") == [
+        Claim(kind=KIND_COMMIT, value="b9f38fa", repo="jomakori/hermes-omo-plugin"),
+    ]
+
+
+def test_a_github_commit_url_is_claimed_with_its_repo():
+    url = "https://github.com/jomakori/hermes-omo-plugin/commit/b9f38fa"
+    assert extract_claims(f"Pushed it, see {url}") == [
+        Claim(kind=KIND_COMMIT, value="b9f38fa", repo="jomakori/hermes-omo-plugin"),
+    ]
+
+
+def test_a_short_sha_with_explicit_commit_wording_in_clause_is_claimed():
+    assert extract_claims("Pushed as abc1234 to the remote") == [
+        Claim(kind=KIND_COMMIT, value="abc1234"),
+    ]
+    assert extract_claims("SHA abc1234 is on the remote") == [
+        Claim(kind=KIND_COMMIT, value="abc1234"),
+    ]
+    assert extract_claims("Committed abc1234 locally") == [
+        Claim(kind=KIND_COMMIT, value="abc1234"),
     ]
 
 
