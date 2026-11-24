@@ -18,6 +18,8 @@ analysis stage · metis · Plan Consultant
 
 The goal is stated **once** in the run heading — `🏗️ omo · <run_id> — <goal≤60>`, with `· N workers` appended at fan-out — and never repeated per worker. Each worker is one block whose first line is `<label> · <agent display>`, where `<label>` is the ticket id when one is present, else the first clause cut on a word boundary to 24 characters above 8 workers (44 otherwise).
 
+The line under the heading is the **coordinator row** — `coordinator · <agent> · <model> · N workers (<elapsed>)`, and under it the rotating `  ↳ cycling: <phrase> (3s)`. It is not a worker block (it never counts towards `· N workers`), and it is why the message can be posted before any worker event exists: the elapsed clock and the phrase rotate on the heartbeat from t+0, so acceptance itself is visible. A settled run drops the phrase and freezes the elapsed clock at the moment it ended.
+
 Each block lists three phases in order — `dispatch`, `run`, `review` — one row each. The `dispatch` row is dropped once the worker has started, and the `review` row is dropped when the run was created with `review: false`.
 
 | Emoji | Meaning |
@@ -46,7 +48,7 @@ The value comes from the worker's own profile store (`profiles/<agent>/state.db`
 
 ## Delivery
 
-The message is posted on the run's first transition and then edited in place.
+The message is posted when the run is accepted — at dispatch, before any worker event exists — and then edited in place.
 
 - A render whose text is unchanged is skipped (no-op dedupe).
 - Otherwise edits are throttled to at least `status_edit_interval`; a throttled change is remembered and flushed on the next tick, so a burst never loses the last state.
@@ -77,6 +79,7 @@ Transitions are announced as bare event names (the host namespaces them as `omo:
 |---|---|
 | `worker_running` / `worker_succeeded` / `worker_failed` / `worker_cancelled` / `worker_done` | `engine.py` — a worker's status change |
 | `worker_interrupted` | `engine.py` — a worker recovered as interrupted, or on shutdown |
+| `run_dispatched` | `engine.py` — the run is accepted, before the worker starts |
 | `run_created` | `graph.py` — the run record is written |
 | `task_started` / `task_blocked` | `graph.py` — a task is submitted, or blocked on a failed dependency |
 | `task_settled` | `graph.py` — a task's future completes |

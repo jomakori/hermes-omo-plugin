@@ -23,6 +23,11 @@ ROTATE_INTERVAL_SECONDS = 3.0
 # Cycling phrases per phase. Small, human, and observed to change so the message
 # reads as alive between transitions rather than frozen on the last event.
 CYCLING_PHRASES: dict[str, tuple[str, ...]] = {
+    "coordinator": (
+        "polling workers…",
+        "waiting on the worker…",
+        "watching for a first event…",
+    ),
     "dispatch": (
         "handing off to the worker…",
         "opening the session…",

@@ -92,6 +92,10 @@ _RUN_CAUSE = ("blocked", "interrupted", "failed", "cancelled")
 
 # The run heading appears once per message; worker lines never repeat the goal.
 HEADER_PREFIX = "🏗️ omo"
+# The coordinator row sits directly under the heading: the run's owner, its
+# model and the rotating phrase that keeps the message alive before any worker
+# event exists. Prefixed so it can never be mistaken for a worker block.
+COORDINATOR_PREFIX = "coordinator"
 DEFAULT_MAX_CHARS = 2000
 DEFAULT_MAX_GOAL_CHARS = 60
 # A worker's condensed label: tighter once the run fans out wide, so a 24-worker
@@ -504,11 +508,47 @@ def _heading(run: dict[str, Any]) -> str:
     return head
 
 
+def _coordinator_block(run: dict[str, Any]) -> str:
+    """The coordinator row: who owns the run, and what it is doing right now.
+
+    Rendered off the run rather than a worker block, so it never counts as a
+    worker. While the run is live it carries the elapsed clock and the rotating
+    phrase — that is the line that makes the message look alive from t+0, in the
+    window before the first worker event exists. A settled run drops the phrase
+    and freezes the clock at the moment it ended.
+    """
+    coordinator = run.get("coordinator")
+    if not isinstance(coordinator, dict) or not coordinator:
+        return ""
+    head = _join(COORDINATOR_PREFIX, coordinator.get("agent"), coordinator.get("model"))
+    if not head:
+        return ""
+    workers = int(coordinator.get("workers") or 0)
+    if workers > 0:
+        head = f"{head} · {workers} worker{'s' if workers > 1 else ''}"
+    elapsed = str(coordinator.get("elapsed") or "").strip()
+    line = f"{head} ({elapsed})" if elapsed else head
+    phrase = str(coordinator.get("phrase") or "").strip()
+    if not phrase:
+        return line
+    seconds = int(coordinator.get("rotate_seconds") or ROTATE_INTERVAL_SECONDS)
+    return f"{line}\n  {ACTIVITY_GLYPH} cycling: {phrase} ({seconds}s)"
+
+
+def _head_block(run: dict[str, Any]) -> str:
+    """The heading plus the coordinator row, when the run carries one."""
+    heading = _heading(run)
+    coordinator = _coordinator_block(run)
+    if coordinator:
+        return f"{heading}\n{coordinator}" if heading else coordinator
+    return heading
+
+
 def render_status(run: Any, *, max_chars: int = DEFAULT_MAX_CHARS) -> str:
     """Render the run heading plus every worker block, collapsing to fit Discord."""
     run = run if isinstance(run, dict) else {}
     workers = [b for b in (run.get("workers") or []) if isinstance(b, dict)]
-    heading = _heading(run)
+    heading = _head_block(run)
     body = "\n\n".join(render_block(b) for b in workers)
     if body:
         text = f"{heading}\n\n{body}" if heading else body
@@ -528,7 +568,7 @@ def _collapse(run: dict[str, Any], blocks: list[dict[str, Any]], max_chars: int)
     is ever dot-dotted out: the sole ellipsis is the ``…N more`` marker.
     """
     count = len(blocks)
-    heading = _heading(run)
+    heading = _head_block(run)
     if count == 0:
         return _cut(run.get("goal"), max_chars)
     budgets = [len([p for p in (b.get("phases") or []) if isinstance(p, dict)]) for b in blocks]

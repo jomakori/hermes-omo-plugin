@@ -187,6 +187,16 @@ class _RunState:
     # the next real event.
     post_attempt_at: float = float("-inf")
     post_backoff: float = 0.0
+    # The agent that owns the run and the model serving it, folded in from the
+    # dispatch-time event. Rendered as the coordinator row, and the only state
+    # that exists when the message is first posted — its elapsed clock and
+    # rotating phrase are what keep the message alive before the first worker
+    # event arrives.
+    coordinator_agent: str = ""
+    coordinator_model: str = ""
+    # When the run reached its terminal state: the coordinator row's clock stops
+    # here rather than ticking past the end of the run.
+    ended_at: float | None = None
 
 
 class StatusTracker:
@@ -249,6 +259,11 @@ class StatusTracker:
         self._reduce(state, str(event), payload, now)
         if self._settled(state):
             state.terminal = True
+        # Freeze the coordinator row's clock at the moment the run ended, so the
+        # final edit reports how long the whole run took rather than how long ago
+        # the message was last drawn.
+        if state.terminal and state.ended_at is None:
+            state.ended_at = now
         # Unpin exactly once, and only on the successful terminal: a failed,
         # blocked, cancelled or interrupted run (or one still running) stays
         # pinned, as does any non-terminal state.
@@ -276,7 +291,11 @@ class StatusTracker:
             if state.terminal:
                 continue
             rotated = False
-            if self._has_current(state) and (now - state.phrase_at) >= self.phrase_interval:
+            # A coordinator row rotates on its own: between accepting a dispatch
+            # and the worker's first event there is no `current` phase to gate on,
+            # and standing still is exactly what the run looks like from Discord.
+            rotating = self._has_current(state) or bool(state.coordinator_agent)
+            if rotating and (now - state.phrase_at) >= self.phrase_interval:
                 state.phrase_at = now
                 state.phrase_index += 1
                 rotated = True
@@ -477,11 +496,24 @@ class StatusTracker:
                     "phases": phases,
                 }
             )
+        coordinator: dict[str, Any] = {}
+        if state.coordinator_agent:
+            live = not state.terminal
+            coordinator = {
+                "agent": state.coordinator_agent,
+                "model": state.coordinator_model,
+                "workers": len(state.blocks),
+                "elapsed": _format_duration(state.created_at, now if live else (state.ended_at or now)),
+                "rotate_seconds": int(self.phrase_interval),
+            }
+            if live:
+                coordinator["phrase"] = cycling_phrase("coordinator", state.phrase_index)
         run = {
             "run_id": state.run_key,
             "goal": state.process,
             "review": state.review,
             "workers": workers,
+            "coordinator": coordinator,
         }
         return render_status(run, max_chars=self.max_chars)
 
@@ -607,6 +639,27 @@ def _h_run_created(tracker: StatusTracker, state: _RunState, payload: dict[str, 
     state.process = str(payload.get("goal") or payload.get("process") or state.process or "").strip()
     # Read the review flag straight off the payload: no key means no review row.
     state.review = bool(payload.get("review", False))
+    _seed_blocks(tracker, state, payload)
+
+
+def _h_run_dispatched(tracker: StatusTracker, state: _RunState, payload: dict[str, Any], now: float) -> None:
+    """Fold the snapshot the engine has when it accepts a run.
+
+    Emitted at dispatch, before the worker has done anything: it carries the
+    coordinator (agent + model) and the worker rows still pending, which is what
+    makes the status message post and stay alive from t+0 instead of waiting for
+    the first worker event. The blocks seeded here are the same ones the later
+    worker events update, so nothing is rendered twice.
+    """
+    coordinator = payload.get("coordinator")
+    if isinstance(coordinator, dict):
+        state.coordinator_agent = str(coordinator.get("agent") or coordinator.get("display") or "").strip()
+        state.coordinator_model = str(coordinator.get("model") or "").strip()
+    _seed_blocks(tracker, state, payload)
+
+
+def _seed_blocks(tracker: StatusTracker, state: _RunState, payload: dict[str, Any]) -> None:
+    """Create one pending block per declared worker, so rows exist pre-event."""
     workers = payload.get("workers") or []
     if workers:
         state.fanout = len([w for w in workers if isinstance(w, dict)])
@@ -751,6 +804,7 @@ def _worker_handler(status: str):
 
 _HANDLERS: dict[str, Callable[[StatusTracker, _RunState, dict[str, Any], float], None]] = {
     "run_created": _h_run_created,
+    "run_dispatched": _h_run_dispatched,
     "task_started": _h_task_started,
     "task_blocked": _h_task_blocked,
     "task_settled": _h_task_settled,
