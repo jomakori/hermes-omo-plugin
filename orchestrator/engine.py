@@ -654,6 +654,33 @@ class OmoEngine:
         # set is not exposed to plugins.
         request = self._request(goal=goal, context=context, spec=spec, model=worker.model, toolsets=None)
 
+        # Announce the run the moment it is accepted, before the worker has done
+        # anything at all. The status message has to be visibly alive from t+0:
+        # without this the first post waits for a worker event, and the window
+        # where someone is actually staring at an empty channel is exactly the
+        # window it is silent in. The coordinator row gives the heartbeat
+        # rotation something to edit until the first real event lands.
+        self._progress(
+            "run_dispatched",
+            {
+                "run_id": run_id,
+                "goal": goal,
+                "workers": [
+                    {
+                        "agent": name,
+                        "task_id": worker.task_id or "",
+                        "display": spec.display,
+                        "task": goal,
+                        "title": str(title or "").strip(),
+                    }
+                ],
+                "coordinator": {
+                    "agent": parent_agent if parent_agent in AGENTS else name,
+                    "model": worker.model or "",
+                },
+            },
+        )
+
         if background:
             worker.status = RUNNING
             self._spawn(self._run_worker_and_wake(run, worker, request))

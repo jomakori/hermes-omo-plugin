@@ -119,7 +119,9 @@ def test_engine_emits_bare_event_names():
     engine.dispatch(goal="add a widget", target="hephaestus")
 
     names = ctx.names()
-    assert names[:2] == ["worker_running", "worker_succeeded"]
+    # The dispatch-time snapshot leads: the status message must exist before the
+    # worker does anything (OMR-23), so the first event is the run's own.
+    assert names[:3] == ["run_dispatched", "worker_running", "worker_succeeded"]
     # Bare names only: the host prefixes them with the plugin key itself, and
     # rejects a name that already carries one.
     assert all(":" not in name for name in names)
@@ -137,8 +139,10 @@ def test_engine_emits_worker_failed_when_the_chain_is_exhausted():
     engine.dispatch(goal="do the impossible", target="hephaestus")
 
     names = ctx.names()
-    assert names[0] == "worker_running"
-    assert names[-1] == "worker_failed"
+    # The dispatch-time snapshot leads; the chain exhaustion then closes the run
+    # with a failed worker. A trailing event may belong to the nested self-patch
+    # run this outcome triggers, which is a run of its own.
+    assert names[:3] == ["run_dispatched", "worker_running", "worker_failed"]
 
 
 def test_engine_emits_worker_cancelled_for_a_prestart_cancel():
